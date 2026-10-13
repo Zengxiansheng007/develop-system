@@ -74,6 +74,12 @@ def validate_plan(plan, registry):
         prerequisites = step.get("shared_preconditions", [])
         if not isinstance(prerequisites, list) or any(not isinstance(p, str) or not p.strip() for p in prerequisites):
             raise ValueError("shared_preconditions must contain named known premises")
+        recovery = step.get("recovery_for", [])
+        if not isinstance(recovery, list) or any(not isinstance(r, str) or not r.strip() for r in recovery):
+            raise ValueError("Recovery must name restriction identities")
+        if recovery and ("shared_preconditions" not in step or not isinstance(step.get("authorization_reference"), str)
+                         or not step["authorization_reference"].strip()):
+            raise ValueError("Recovery needs explicit premises and an existing authorization reference")
         steps[step["step_id"]] = step
     visited, active = set(), set()
     def visit(name):
@@ -144,6 +150,10 @@ def step_restricted(state, step):
             break
         related = expanded
     for restriction in scoped_restrictions(state):
+        if restriction["kind"] == "system":
+            if not recovery_allowed(step, restriction):
+                return True
+            continue
         if restriction.get("frame_id") in step.get("resolves_frames", []) and restriction["kind"] == "findings":
             continue
         if (restriction.get("scope") == "unknown" or restriction.get("step_id") in related
@@ -174,6 +184,10 @@ def child_restricted(state, parent, skill_id):
         ancestors.add(ancestor)
         ancestor = next(f for f in state["frames"] if f["frame_id"] == ancestor).get("parent_frame_id")
     for restriction in scoped_restrictions(state):
+        if restriction["kind"] == "system":
+            if not recovery_allowed(parent, restriction):
+                return True
+            continue
         if (restriction.get("scope") == "unknown" or restriction.get("frame_id") in ancestors
                 or set(restriction.get("shared_preconditions", [])) & set(parent.get("shared_preconditions", []))):
             return True
@@ -236,6 +250,84 @@ def select_registered_skill(state, project, skill_id, skill_path=None):
     roots = [project / ".agents/skills", project / ".codex/skills", Path.home() / ".agents/skills",
              Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))) / "skills"]
     return resolve_skill(skill_id, roots=roots, explicit=selected_path)
+
+
+def validate_system_conclusions(state, item):
+    conclusions = item.get("system_conclusions", [])
+    if not isinstance(conclusions, list):
+        raise ValueError("System conclusions must be an array")
+    if conclusions and (item["status"] != "completed" or item.get("completion_checked") is not True):
+        raise ValueError("System facts require a completed professional conclusion")
+    seen = set()
+    for conclusion in conclusions:
+        if not isinstance(conclusion, dict):
+            raise ValueError("System conclusion must be an object")
+        identity = conclusion.get("restriction_id")
+        premises = conclusion.get("failed_preconditions")
+        if (not isinstance(identity, str) or not identity.strip() or identity in seen
+                or conclusion.get("scope") != "global" or conclusion.get("action") not in {"set", "clear"}
+                or not isinstance(premises, list) or not premises
+                or any(not isinstance(p, str) or not p.strip() for p in premises)):
+            raise ValueError("System conclusion needs unique identity, explicit scope and failed premises")
+        seen.add(identity)
+        original = next((e for e in state["events"] if e["event_id"] == item["event_id"]), None)
+        if conclusion["action"] == "set" and not original and any(c.get("restriction_id") == identity for e in state["events"] for c in e.get("system_conclusions", [])):
+            raise ValueError("Restriction identity already belongs to another professional event")
+        if conclusion["action"] == "clear":
+            if any(c["status"] != "passed" for c in item["checks"]):
+                raise ValueError("Failed checks cannot support a recovery conclusion")
+            source = next((e for e in state["events"] if e["event_id"] == conclusion.get("blocked_event_id")), {})
+            block = next((c for c in source.get("system_conclusions", []) if c["restriction_id"] == identity and c["action"] == "set"), None)
+            if not block or block["scope"] != conclusion["scope"] or block["failed_preconditions"] != premises:
+                raise ValueError("Recovery conclusion must identify the exact original restriction and scope")
+        proof = [file_evidence(e) for e in conclusion.get("evidence", [])]
+        if not proof or any(not any(e["path"] == a["path"] and e["sha256"] == a["sha256"] for a in item["artifacts"]) for e in proof):
+            raise ValueError("System conclusion must cite its current professional artifacts")
+        conclusion["evidence"] = proof
+
+
+def apply_system_conclusions(state, event):
+    if state["control"]["status"] != "running" or not event.get("system_conclusions"):
+        return
+    reconcile_system_conclusions(state)
+
+
+def reconcile_system_conclusions(state):
+    if state["control"]["status"] != "running":
+        return
+    active = {}
+    for event in state["events"]:
+        if not event.get("system_conclusions"):
+            continue
+        source = next(f for f in state["frames"] if f["frame_id"] == event["frame_id"])
+        current = source["status"] == "completed" and all(evidence_is_current(e) for e in frame_evidence(source))
+        for conclusion in event["system_conclusions"]:
+            identity = conclusion["restriction_id"]
+            if conclusion["action"] == "set":
+                # A stale source is an unresolved safety hold, not a new professional fact.
+                active[identity] = {**copy.deepcopy(conclusion), "kind": "system", "source_current": current,
+                    "source_event_id": event["event_id"], "source_frame_id": event["frame_id"]}
+            elif current and identity in active and active[identity]["source_event_id"] == conclusion["blocked_event_id"]:
+                del active[identity]
+        if current and event["event_id"] not in state.get("system_applications", []):
+            state.setdefault("system_applications", []).append(event["event_id"])
+    state["restrictions"] = [r for r in state["restrictions"] if r["kind"] != "system"] + list(active.values())
+    explain_system_restrictions(state)
+
+
+def recovery_allowed(work, restriction):
+    return (restriction["restriction_id"] in work.get("recovery_for", [])
+            and isinstance(work.get("authorization_reference"), str) and bool(work["authorization_reference"].strip())
+            and "shared_preconditions" in work
+            and not set(work["shared_preconditions"]) & set(restriction["failed_preconditions"]))
+
+
+def explain_system_restrictions(state):
+    active = [r for r in state["restrictions"] if r["kind"] == "system"]
+    if active and state["control"]["status"] == "running":
+        state["next_decision"] = {"action": "system_restricted",
+            "restriction_ids": sorted(r["restriction_id"] for r in active),
+            "reason": "Professional common prerequisites remain unresolved; only authorized bound recovery may proceed"}
 
 
 
@@ -449,6 +541,8 @@ class RunStore:
         state["frames"].append({"frame_id": uuid.uuid4().hex, "parent_frame_id": parent_frame_id, "step_id": step_id,
                                 "protocol_version": 1,
                                 "shared_preconditions": copy.deepcopy(prerequisites),
+                                "recovery_for": copy.deepcopy((step if step_id is not None else parent).get("recovery_for", [])),
+                                "authorization_reference": (step if step_id is not None else parent).get("authorization_reference"),
                                 "skill_id": skill_id, "skill_path": selected["skill_path"], "skill_sha256": selected["sha256"], "mode": mode,
                                 "done_when": descriptor["done_when"], "status": "running", "required": step["required"] if step_id is not None else required, "input_version": input_version,
                                 "inputs": captured, "artifacts": [], "needs_assessment": False})
@@ -503,6 +597,7 @@ class RunStore:
                 item['grill_delivery']['document'] = document
             if item["status"] == "completed" and not item["artifacts"] and not item["checks"]:
                 raise ValueError("Completed return needs actual artifacts or checks")
+            validate_system_conclusions(state, item)
             acceptance = item.get("acceptance_checks", [])
             resolutions = item.get("resolved_findings", [])
             if not isinstance(acceptance, list) or not isinstance(resolutions, list) or any(not isinstance(v, str) for v in resolutions):
@@ -564,6 +659,8 @@ class RunStore:
                     if updated["control"]["status"] == "running":
                         updated["next_decision"] = {"action": "stop_repeated_no_progress", "signature": list(current_signature),
                                                     "frame_id": frame["frame_id"], "scope": "local"}
+            apply_system_conclusions(updated, item)
+            explain_system_restrictions(updated)
             return updated
         return self.mutate(revision, change)
 
@@ -745,36 +842,45 @@ class RunStore:
                     remaining.append(restriction)
             state["restrictions"] = remaining
             stale = set()
+            affected = set()
             for frame in state["frames"]:
                 if frame["status"] == "superseded":
                     continue
                 evidence = frame_evidence(frame) + [e for a in state["assessments"] if a["frame_id"] == frame["frame_id"] for e in a["evidence"]]
                 if not all(evidence_is_current(e) for e in evidence):
                     frame["status"] = "stale"
+                    affected.add(root_step_id(state, frame["frame_id"]))
                     if frame.get("step_id"):
                         stale.add(frame["step_id"])
                     parent = frame.get("parent_frame_id")
                     while parent:
                         ancestor = next(f for f in state["frames"] if f["frame_id"] == parent)
-                        ancestor["status"] = "stale"
-                        if ancestor.get("step_id"):
-                            stale.add(ancestor["step_id"])
+                        # An active parent still owns valid independent child work.
+                        # Its stale required child prevents premature completion.
+                        if ancestor["status"] == "completed":
+                            ancestor["status"] = "stale"
+                            if ancestor.get("step_id"):
+                                stale.add(ancestor["step_id"])
                         parent = ancestor.get("parent_frame_id")
-                elif not user_paused and frame["status"] in {"running", "waiting_user", "blocked"}:
-                    frame["status"] = "interrupted"
-                    if frame.get("step_id"):
-                        stale.add(frame["step_id"])
             changed = True
+            capabilities = {s["id"]: s for s in state["registry"]["skills"] + state["temporary_skills"]}
             while changed:
                 changed = False
+                affected_skills = {s["skill_id"] for s in state["plan"] if s["step_id"] in affected}
                 for step in state["plan"]:
-                    if set(step.get("depends_on", [])) & stale and step["step_id"] not in stale:
-                        stale.add(step["step_id"]); changed = True
+                    dependency_changed = (set(step.get("depends_on", [])) & affected
+                        or set(capabilities[step["skill_id"]]["requires"]) & affected_skills)
+                    if dependency_changed and step["step_id"] not in stale:
+                        stale.add(step["step_id"]); affected.add(step["step_id"]); changed = True
             for step in state["plan"]:
                 if step["step_id"] in stale:
                     step["status"] = "pending"
             for frame in state["frames"]:
                 if frame.get("step_id") in stale and frame["status"] != "superseded":
+                    frame["status"] = "stale"
+            invalidated = descendant_frame_ids(state["frames"], {f["frame_id"] for f in state["frames"] if f["status"] == "stale"})
+            for frame in state["frames"]:
+                if frame["frame_id"] in invalidated and frame["status"] != "superseded":
                     frame["status"] = "stale"
             for assessment in state["assessments"]:
                 source = next(f for f in state["frames"] if f["frame_id"] == assessment["source_frame_id"])
@@ -784,18 +890,24 @@ class RunStore:
                         target["needs_assessment"] = True
             if stale:
                 for criterion in state["acceptance"]:
-                    criterion.update(status="pending", evidence=[])
+                    source = next((f for f in state["frames"] if f["frame_id"] == criterion.get("source_frame_id")), None)
+                    if source and source["status"] in {"stale", "superseded", "interrupted"}:
+                        criterion.update(status="pending", evidence=[])
             state["status"] = "running"
             state["control"] = {"status": "running", "user_reason": None}
             if user_paused:
                 state["control"]["resume_user_reference"] = user_reference
             state["next_decision"] = {"action": "revalidate_and_select", "invalidated_steps": sorted(stale),
                                       "note": "File hashes do not prove live runtime health; recheck environmental blockers and actual verification."}
+            reconcile_system_conclusions(state)
+            explain_system_restrictions(state)
             return state
         return self.mutate(revision, change)
 
     def complete(self, revision, checks):
         def change(state):
+            if any(r["kind"] == "system" for r in state["restrictions"]):
+                raise ValueError("Professional system restrictions remain unresolved")
             if state["status"] != "running" or any(s["required"] and s["status"] != "completed" for s in state["plan"]):
                 raise ValueError("Necessary scoped steps are unfinished")
             relevant = [f for f in state["frames"] if f["status"] != "superseded"]

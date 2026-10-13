@@ -37,12 +37,12 @@ return --payload <结果文件> 的结构见 [统一执行协议](codex-runtime.
 
 ## 恢复与迁移
 
-- resume 检查技能、输入、产物、发现和验收证据 hash；变化使相应步骤/依赖和验收失效。未决发现保留，不靠恢复抹去。
+- resume 检查技能、输入、产物、发现和验收证据 hash；变化只使相关帧/依赖及有对应来源的验收失效。有效结果和在途帧保留，未决发现不靠恢复抹去。系统限制按[专业恢复契约](scoped-state.md#系统限制与专业恢复)重新核验。
 - 用户暂停期间 return 仅保存有效回传；明确继续时 resume 增加 --user-reference <真实用户指令来源>，保留有效在途帧。收件与应用结论的边界见[暂停收件](scoped-state.md#暂停收件与明确继续)。
-- 中断旧帧由重新分派替代全部后代，旧结果不能覆盖新帧。
+- 已失效或中断旧帧由明确重新分派替代受影响后代，旧结果不能覆盖新帧。
 - 环境健康由对应专业技能实际验证；哈希一致不证明服务存活。
 - 同技能/输入/阻塞两次无进展停止重试；用户明确暂停/取消时 pause/cancel --reason，完成或取消 run 不恢复。
-- 当前 T01–T02 候选创建 state v4，registry 仍为 v2；新帧及回流必须携带 protocol_version: 1。v3 可 show，只读状态不能 dispatch/return/resume/control/complete；v1/v2 仍拒绝自动续跑。显式迁移和 registry v3 由后续票交付，不能据此候选采用到旧运行。
+- 当前 T01–T03 候选创建 state v4，registry 仍为 v2；新帧及回流必须携带 protocol_version: 1。v3 可 show，只读状态不能 dispatch/return/resume/control/complete；v1/v2 仍拒绝自动续跑。显式迁移和 registry v3 由后续票交付，不能据此候选采用到旧运行。
 
 局部限制、就绪与完成的含义见[作用范围](scoped-state.md)。
 

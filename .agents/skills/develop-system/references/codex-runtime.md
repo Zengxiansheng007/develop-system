@@ -1,4 +1,4 @@
-# Codex统一执行协议：state v4 / 回流代次 1（首批 T01–T02 候选）
+# Codex统一执行协议：state v4 / 回流代次 1（首批 T01–T03 候选）
 
 本协议的帧/状态/强制回流仅在显式 develop-system 流程内启用。流程外技能返回调用方。ask-matt 纯导航，不建帧、不分派、不写状态。
 
@@ -51,6 +51,8 @@ status 为 completed/failed/blocked/waiting_user/skipped/cancelled。completion_
 acceptance_checks 由本技能对有能力验证的 run 验收项返回，格式：`{"id":"1","status":"passed","completion_checked":true,"kind":"technical","evidence":["真实报告路径"]}`。人工项 kind 为 human，同时须 human_confirmed: true 与非空 user_reference（真实答复/操作来源）；生成向导不构成用户确认。失败、未验证和待确认项不能作为关闭依据。
 
 resolved_findings 为专业技能确认已处理的旧 frame_id 数组；结论附真实证据。调度器的 assess 操作只登记这个来源，不自行生成处理结论。
+
+共用前提失效或恢复时，专业结果通过 system_conclusions 返回有来源的结论；字段、暂停处理和恢复工作例外见[系统限制与专业恢复](scoped-state.md#系统限制与专业恢复)。
 
 ## 回流与衔接
 

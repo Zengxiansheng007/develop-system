@@ -134,8 +134,10 @@ class GrillRoutingTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             other.route_grill(state['revision'], event['event_id'])
 
-    def test_attachment_revalidates_revision_inputs_and_interrupted_frames(self):
-        state = self.store.attach_grill(self.state['revision'], self.context)
+    def test_attachment_revalidates_revision_inputs_and_changed_frames(self):
+        source = self.root / 'interview-input.txt'
+        source.write_text('original inputs', encoding='utf-8')
+        state = self.store.attach_grill(self.state['revision'], self.context, inputs=[str(source)])
         old_event = self.grill_event(state)
         before = self.store.path.read_bytes()
         for revision, context in ((0,self.context), (state['revision'],{**self.context,'input_version':'v2'}),
@@ -143,8 +145,9 @@ class GrillRoutingTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 self.store.attach_grill(revision, context)
             self.assertEqual(before, self.store.path.read_bytes())
+        source.write_text('changed inputs', encoding='utf-8')
         state = self.store.resume(state['revision'])
-        state = self.store.attach_grill(state['revision'], {**self.context,'input_version':'v2'})
+        state = self.store.attach_grill(state['revision'], {**self.context,'input_version':'v2'}, inputs=[str(source)])
         self.assertEqual(state['frames'][0]['status'], 'superseded')
         self.assertEqual(state['frames'][-1]['input_version'], 'v2')
         with self.assertRaises(ValueError):

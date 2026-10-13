@@ -1,8 +1,20 @@
 # Develop System
 
-此术语表记录 [首批规格 #1](https://github.com/Zengxiansheng007/develop-system/issues/1) 与 [实施票 #2](https://github.com/Zengxiansheng007/develop-system/issues/2) 已采用的领域含义。定义沿用 2026-10-13 流程优化讨论的用户决定；当前行为与尚未交付的能力见[局部作用范围](.agents/skills/develop-system/references/scoped-state.md)。
+此术语表记录 [首批规格 #1](https://github.com/Zengxiansheng007/develop-system/issues/1)、[实施票 #2](https://github.com/Zengxiansheng007/develop-system/issues/2) 与 [实施票 #4](https://github.com/Zengxiansheng007/develop-system/issues/4) 已采用的领域含义。定义沿用 2026-10-13 流程优化讨论的用户决定；当前行为与尚未交付的能力见[局部作用范围](.agents/skills/develop-system/references/scoped-state.md)。
 
 ## Language
+
+**系统全局限制**：
+由当前专业结论确认的共用前提失效所造成的运行推进限制；每项限制保留自己的原因和解除依据，与用户运行控制分别存在。
+_Avoid_: 用户暂停、全部任务失败
+
+**恢复工作**：
+为解除指定系统限制而开展、已获授权且能在失效前提之外完成的专业工作。
+_Avoid_: 自动重试、重新开始整个运行
+
+**结论失效范围**：
+已发生变化使哪些工作及其依赖结论需要重新验证的范围；已确认无关的工作仍有效，尚不明确的关联仍待核验。
+_Avoid_: 全量重做、恢复授权
 
 **用户运行控制**：
 用户对整个运行是否继续推进、暂停或取消的决定；某项专业工作的局部结果不改变该决定。

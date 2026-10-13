@@ -124,13 +124,16 @@ class DurableWorkflowTests(unittest.TestCase):
         state = self.receive(self.dispatch(state, "to-spec", "spec-step"))
         self.assertEqual(self.complete(state)["status"], "completed")
 
-    def test_resume_interrupts_old_frames_and_supersedes_all_descendants(self):
-        state = self.dispatch(self.create())
+    def test_changed_root_inputs_invalidate_old_frames_and_all_descendants(self):
+        source = self.root / "root-input.txt"
+        source.write_text("original source", encoding="utf-8")
+        state = self.dispatch(self.create(), inputs=[str(source)])
         root = state["frames"][-1]["frame_id"]
         old_event = self.event(state)
         state = self.dispatch(state, "domain-modeling", parent=root)
         child = state["frames"][-1]["frame_id"]
         state = self.dispatch(state, "codebase-design", parent=child)
+        source.write_text("changed source", encoding="utf-8")
         state = self.store.resume(state["revision"])
         with self.assertRaises(ValueError):
             self.store.receive(state["revision"], old_event)
