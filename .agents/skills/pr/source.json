@@ -1,0 +1,16 @@
+{
+  "repository": "https://github.com/mattpocock/skills",
+  "commit": "4588b32ecab9ecc9fc8cc6b6c5e7d675b6004b0d",
+  "source_path": "skills/engineering/pr",
+  "license": "MIT",
+  "original_files": {
+    "CREDITS.md": "a7a087127665d7298a72280ef6e19c41ad8404523712a788c8dc3ab414bc2497",
+    "SKILL.md": "ab63f1cf78647389edcd386c9427c5dfca27ed2836930c24773ffee834c19bcd",
+    "agents\\openai.yaml": "2295b586624db4ef546f3fd4695492f039d941a46d8a1593a702ce3ca511b8ad"
+  },
+  "changes": [
+    "Codex loading/delegation adapter",
+    "in-flow mandatory returns",
+    "specialist responsibility and platform/authorization boundaries"
+  ]
+}

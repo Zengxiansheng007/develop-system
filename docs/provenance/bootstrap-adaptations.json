@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "changes": [
+    "Repository configuration and source ownership",
+    "Manifest-based verification stages all 25 skills",
+    "Typed support for two existing upstream invocation metadata fields",
+    "Deterministic allowlisted source bundle and manual draft release workflow",
+    "UTF-8 LF normalization before source freeze"
+  ],
+  "line_endings": []
+}

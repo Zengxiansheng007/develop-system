@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "skills": [
+    "ask-matt",
+    "code-review",
+    "codebase-design",
+    "develop-system",
+    "diagnosing-bugs",
+    "domain-modeling",
+    "grill-with-docs",
+    "grilling",
+    "handoff",
+    "implement",
+    "implement-spec",
+    "improve-codebase-architecture",
+    "pr",
+    "prototype",
+    "research",
+    "retro",
+    "setup-matt-pocock-skills",
+    "tdd",
+    "to-spec",
+    "to-tickets",
+    "triage",
+    "wait-what",
+    "wayfinder",
+    "wizard",
+    "writing-for-agents"
+  ]
+}

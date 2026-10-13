@@ -1,0 +1,6 @@
+interface:
+  display_name: "Ask Matt"
+  short_description: "Matt 技能流程导航入口：只推荐适合的技能与路线，不启动调度或写入流程状态"
+  default_prompt: "使用 $ask-matt 根据当前情况推荐合适的技能与工作路线，只提供导航建议。"
+policy:
+  allow_implicit_invocation: false

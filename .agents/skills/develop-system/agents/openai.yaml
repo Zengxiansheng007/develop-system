@@ -1,0 +1,6 @@
+interface:
+  display_name: "Develop System"
+  short_description: "开发流程调度入口：维护依赖与恢复状态，专业执行和验收交由对应技能，所有结果先回流"
+  default_prompt: "使用 $develop-system 调度当前开发目标，分派专业技能并登记其结论，自动衔接范围内工作。"
+policy:
+  allow_implicit_invocation: false

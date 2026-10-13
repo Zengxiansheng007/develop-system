@@ -1,0 +1,374 @@
+{
+  "schema_version": 2,
+  "controller": "develop-system",
+  "return_to": "develop-system",
+  "stages": [
+    "prepare",
+    "requirements-design",
+    "development-testing",
+    "delivery-retrospective"
+  ],
+  "aliases": {},
+  "default_flows": {
+    "feature": [
+      "grill-with-docs",
+      "to-spec",
+      "to-tickets",
+      "implement",
+      "code-review",
+      "pr",
+      "retro"
+    ],
+    "bugfix": [
+      "diagnosing-bugs",
+      "code-review",
+      "retro"
+    ],
+    "review-only": [
+      "code-review"
+    ],
+    "design-only": [
+      "grill-with-docs",
+      "codebase-design",
+      "to-spec"
+    ],
+    "architecture": [
+      "improve-codebase-architecture",
+      "codebase-design",
+      "to-spec",
+      "to-tickets",
+      "implement",
+      "code-review"
+    ],
+    "parallel-feature": [
+      "grill-with-docs",
+      "to-spec",
+      "to-tickets",
+      "implement-spec",
+      "code-review",
+      "pr",
+      "retro"
+    ]
+  },
+  "skills": [
+    {
+      "id": "develop-system",
+      "stage": "prepare",
+      "role": "controller",
+      "enabled": true,
+      "return_to": "develop-system",
+      "fallback": "blocked",
+      "path": "SKILL.md",
+      "when": "开发流程入口、恢复入口以及任何受管技能返回后",
+      "done_when": "必要专业技能已返回对应结论且状态与依赖满足，登记完成或准确保存等待/阻塞/暂停/取消",
+      "requires": [],
+      "outputs": [
+        "流程状态与路由决定"
+      ]
+    },
+    {
+      "id": "setup-matt-pocock-skills",
+      "stage": "prepare",
+      "role": "entry",
+      "enabled": true,
+      "return_to": "develop-system",
+      "fallback": "blocked",
+      "when": "本次工作确实依赖尚未配置的工单或文档约定",
+      "done_when": "所需跟踪方式、标签与文档目录已明确",
+      "requires": [],
+      "outputs": [
+        "项目工作约定"
+      ]
+    },
+    {
+      "id": "triage",
+      "stage": "requirements-design",
+      "role": "entry",
+      "enabled": true,
+      "return_to": "develop-system",
+      "fallback": "blocked",
+      "when": "收到尚未整理的外部问题报告",
+      "done_when": "问题事实、范围、优先级与验收条件足够实施",
+      "requires": [],
+      "outputs": [
+        "可实施的问题记录"
+      ]
+    },
+    {
+      "id": "grill-with-docs",
+      "stage": "requirements-design",
+      "role": "primary",
+      "enabled": true,
+      "return_to": "develop-system",
+      "fallback": "blocked",
+      "when": "范围、需求或关键决策仍不明确",
+      "done_when": "必要问题与辅助工作结束，人类需求文档及清单已保存且用户确认当前版本；根帧回流后总路由自动选路线",
+      "next_candidates": [
+        "to-spec",
+        "implement"
+      ],
+      "requires": [],
+      "outputs": [
+        "需求与验收条件",
+        "必要术语和决策",
+        "当前文档版本、确认依据及路线建议"
+      ]
+    },
+    {
+      "id": "research",
+      "stage": "requirements-design",
+      "role": "auxiliary",
+      "enabled": true,
+      "return_to": "develop-system",
+      "fallback": "blocked",
+      "when": "有明确事实或技术问题需要一手资料",
+      "done_when": "研究问题有带来源的结论，并说明不确定项",
+      "requires": [],
+      "outputs": [
+        "带引用的调研结论"
+      ]
+    },
+    {
+      "id": "domain-modeling",
+      "stage": "requirements-design",
+      "role": "auxiliary",
+      "enabled": true,
+      "return_to": "develop-system",
+      "fallback": "blocked",
+      "when": "业务概念、规则或领域术语不一致",
+      "done_when": "相关术语及边界场景一致，必要文档同步",
+      "requires": [],
+      "outputs": [
+        "领域规则与术语"
+      ]
+    },
+    {
+      "id": "wayfinder",
+      "stage": "requirements-design",
+      "role": "entry",
+      "enabled": true,
+      "return_to": "develop-system",
+      "fallback": "blocked",
+      "when": "大型任务的关键路线仍未确定",
+      "done_when": "关键决策已解析到能够形成可实施规格",
+      "requires": [],
+      "outputs": [
+        "决策路线及未决项"
+      ]
+    },
+    {
+      "id": "prototype",
+      "stage": "requirements-design",
+      "role": "auxiliary",
+      "enabled": true,
+      "return_to": "develop-system",
+      "fallback": "blocked",
+      "when": "设计问题需要可运行证据",
+      "done_when": "原型回答约定问题，限制和结论回流设计",
+      "requires": [],
+      "outputs": [
+        "原型与设计结论"
+      ]
+    },
+    {
+      "id": "codebase-design",
+      "stage": "requirements-design",
+      "role": "auxiliary",
+      "enabled": true,
+      "return_to": "develop-system",
+      "fallback": "blocked",
+      "when": "模块职责、接口或验证边界不清晰",
+      "done_when": "模块职责、接口、兼容性和验证边界足够支撑实现",
+      "requires": [],
+      "outputs": [
+        "模块设计与接口约定"
+      ]
+    },
+    {
+      "id": "improve-codebase-architecture",
+      "stage": "requirements-design",
+      "role": "entry",
+      "enabled": true,
+      "return_to": "develop-system",
+      "fallback": "blocked",
+      "when": "用户要求架构调查或出现妨碍修复的模块边界问题",
+      "done_when": "改进候选有当前代码证据和影响分析，调查范围完成",
+      "requires": [],
+      "outputs": [
+        "架构候选与影响报告"
+      ]
+    },
+    {
+      "id": "to-spec",
+      "stage": "requirements-design",
+      "role": "primary",
+      "enabled": true,
+      "return_to": "develop-system",
+      "fallback": "blocked",
+      "when": "已明确的讨论需要形成持久规格",
+      "done_when": "规格记录目标、范围、行为、验收和关键约束",
+      "requires": [],
+      "outputs": [
+        "可实施规格"
+      ]
+    },
+    {
+      "id": "to-tickets",
+      "stage": "requirements-design",
+      "role": "primary",
+      "enabled": true,
+      "return_to": "develop-system",
+      "fallback": "blocked",
+      "when": "工作需要拆分或跨会话执行",
+      "done_when": "任务自包含、可验证，依赖无环且阻塞关系明确",
+      "requires": [],
+      "outputs": [
+        "任务与依赖图"
+      ]
+    },
+    {
+      "id": "implement",
+      "stage": "development-testing",
+      "role": "primary",
+      "enabled": true,
+      "return_to": "develop-system",
+      "fallback": "blocked",
+      "when": "有明确且满足依赖的实施任务",
+      "done_when": "约定行为实现，相关构建和验证完成并记录证据",
+      "requires": [],
+      "outputs": [
+        "实现产物",
+        "验证证据"
+      ]
+    },
+    {
+      "id": "implement-spec",
+      "stage": "development-testing",
+      "role": "primary",
+      "enabled": true,
+      "return_to": "develop-system",
+      "fallback": "blocked",
+      "when": "已有整份规格和任务依赖图，需要统一实现与集成；有授权和环境时并行，否则顺序",
+      "done_when": "任务依赖全部满足，集成产物及验证完成",
+      "requires": [],
+      "outputs": [
+        "集成实现",
+        "集成验证证据"
+      ]
+    },
+    {
+      "id": "tdd",
+      "stage": "development-testing",
+      "role": "auxiliary",
+      "enabled": true,
+      "return_to": "develop-system",
+      "fallback": "blocked",
+      "when": "用户要求测试先行或关键行为需要测试驱动实现",
+      "done_when": "有实际失败、通过与必要重构的证据，约定行为通过",
+      "requires": [],
+      "outputs": [
+        "行为测试",
+        "测试执行结果"
+      ]
+    },
+    {
+      "id": "diagnosing-bugs",
+      "stage": "development-testing",
+      "role": "entry",
+      "enabled": true,
+      "return_to": "develop-system",
+      "fallback": "blocked",
+      "when": "具体故障或性能退化需要诊断",
+      "done_when": "原故障验证不再出现且适当回归通过，或记录真实阻塞",
+      "requires": [],
+      "outputs": [
+        "复现证据",
+        "根因与修复",
+        "回归结果"
+      ]
+    },
+    {
+      "id": "code-review",
+      "stage": "development-testing",
+      "role": "primary",
+      "enabled": true,
+      "return_to": "develop-system",
+      "fallback": "blocked",
+      "when": "实现需要评审或用户直接要求评审",
+      "done_when": "当前变更的规范与需求两方面已检查，问题处理状态明确",
+      "requires": [],
+      "outputs": [
+        "评审结论与发现"
+      ]
+    },
+    {
+      "id": "pr",
+      "stage": "delivery-retrospective",
+      "role": "primary",
+      "enabled": true,
+      "return_to": "develop-system",
+      "fallback": "blocked",
+      "when": "用户目标包含PR或需要PR描述",
+      "done_when": "PR描述完整，约定交付动作完成并有证据",
+      "requires": [],
+      "outputs": [
+        "PR描述",
+        "约定的PR交付证据"
+      ]
+    },
+    {
+      "id": "wizard",
+      "stage": "delivery-retrospective",
+      "role": "auxiliary",
+      "enabled": true,
+      "return_to": "develop-system",
+      "fallback": "blocked",
+      "when": "下一步必须由人完成",
+      "done_when": "向导产物完成；依赖的人工动作须另外验证，未完成则等待",
+      "requires": [],
+      "outputs": [
+        "人工操作向导",
+        "人工步骤完成状态"
+      ]
+    },
+    {
+      "id": "retro",
+      "stage": "delivery-retrospective",
+      "role": "primary",
+      "enabled": true,
+      "return_to": "develop-system",
+      "fallback": "blocked",
+      "when": "用户要求复盘或本次执行暴露重复性流程问题",
+      "done_when": "复盘建议与本次证据对应，原目标完成状态已核对",
+      "requires": [],
+      "outputs": [
+        "流程与环境改进建议"
+      ]
+    },
+    {
+      "id": "grilling",
+      "stage": "requirements-design",
+      "role": "auxiliary",
+      "enabled": true,
+      "return_to": "develop-system",
+      "fallback": "blocked",
+      "when": "需求或决策需要真实用户输入",
+      "done_when": "本帧必要问题已明确或已准确进入等待用户状态",
+      "requires": [],
+      "outputs": [
+        "用户确认的决策或待回答问题"
+      ]
+    }
+  ],
+  "entrypoints": {
+    "develop-system": {
+      "mode": "execute",
+      "skill": "develop-system"
+    },
+    "ask-matt": {
+      "mode": "navigate",
+      "skill": "ask-matt"
+    }
+  },
+  "controller_policy": "dispatch-only"
+}

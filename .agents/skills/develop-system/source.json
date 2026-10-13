@@ -1,0 +1,29 @@
+{
+  "repository": "https://github.com/mattpocock/skills",
+  "source_skill": "ask-matt",
+  "source_path": "skills/engineering/ask-matt",
+  "commit": "4588b32ecab9ecc9fc8cc6b6c5e7d675b6004b0d",
+  "license": "MIT",
+  "adapted_skill": "develop-system",
+  "changes": [
+    "independent ask-matt navigation entry",
+    "dispatch-only develop-system with mandatory returns",
+    "specialist-owned verification and acceptance, schema-v3 state",
+    "versioned extensible registry; missing capabilities block"
+  ],
+  "source_files": [
+    {
+      "path": "ask-matt/PHASE-BOUNDARIES.md",
+      "sha256": "a8aa20158609ef39e2b308b6ba0660c91066838d07a867202e63a7744a88a3ed"
+    },
+    {
+      "path": "ask-matt/SKILL.md",
+      "sha256": "32b3c71d6dbb5a7c15147e8a503a9df28e9a567f45eba6a6bb42aa903225c6ff"
+    },
+    {
+      "path": "ask-matt/agents/openai.yaml",
+      "sha256": "bdffbc5a0a99ed1b6ef3253d251d755fd18162b9845972e380007f844b09b05c"
+    }
+  ],
+  "mode": "dual-entry-dispatch-only"
+}
