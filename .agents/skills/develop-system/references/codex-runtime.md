@@ -1,4 +1,4 @@
-# Codex统一执行协议：state v4 / registry v3 / 回流代次 1（首批 T01–T06 候选）
+# Codex统一执行协议：state v4 / registry v3 / 回流代次 1（首批 T01–T07 候选）
 
 本协议的帧/状态/强制回流仅在显式 develop-system 流程内启用。流程外技能返回调用方。ask-matt 纯导航，不建帧、不分派、不写状态。
 

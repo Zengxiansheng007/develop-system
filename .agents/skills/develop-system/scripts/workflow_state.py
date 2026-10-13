@@ -308,6 +308,52 @@ def preflight_skills(state, project, skill_id, skill_path=None):
         prerequisites=True)
 
 
+def capture_capability_authorizations(plan):
+    """Freeze source scope supplied by the already-authorized plan caller."""
+    captured = copy.deepcopy(plan)
+    for step in captured:
+        authorizations = step.get("capability_authorizations", [])
+        if not isinstance(authorizations, list):
+            raise ValueError("Capability authorizations must be a list")
+        seen = set()
+        for authorization in authorizations:
+            name = authorization.get("skill_id")
+            reference = authorization.get("authorization_reference")
+            if not name or name in seen or not isinstance(reference, str) or not reference.strip():
+                raise ValueError("Capability authorization needs a unique skill and existing user reference")
+            path = authorization.get("skill_path", "")
+            if not Path(path).is_absolute():
+                raise ValueError("Capability authorization needs an explicit absolute source")
+            source = resolve_skill(name, explicit=path)
+            if not source["callable"] or source["sha256"] != authorization.get("sha256"):
+                raise ValueError("Capability authorization source version or invocation policy differs")
+            authorization.update({key: source[key] for key in ("skill_path", "sha256", "policy")})
+            seen.add(name)
+    return captured
+
+
+def authorized_helper(state, step_id, skill_id):
+    step = next(s for s in state["plan"] if s["step_id"] == step_id)
+    authorized = next((a for a in step.get("capability_authorizations", []) if a["skill_id"] == skill_id), None)
+    if not authorized:
+        raise ValueError("Missing existing capability source authorization for this work")
+    source = resolve_skill(skill_id, explicit=authorized["skill_path"])
+    if not source["callable"] or any(source[key] != authorized[key] for key in ("skill_path", "sha256", "policy")):
+        raise ValueError("Authorized helper source version or invocation policy changed")
+    return authorized, {key: source[key] for key in ("skill_path", "sha256", "policy")}
+
+
+def declared_helpers(index, skill_id):
+    needed, pending = set(), [skill_id]
+    while pending:
+        current = pending.pop()
+        for helper in index.get(current, {}).get("required_calls", []):
+            if helper not in needed:
+                needed.add(helper)
+                pending.append(helper)
+    return needed
+
+
 def validate_system_conclusions(state, item):
     conclusions = item.get("system_conclusions", [])
     if not isinstance(conclusions, list):
@@ -468,6 +514,7 @@ class RunStore:
     def create(self, goal, plan, acceptance, registry_path=SKILL_ROOT / "registry.json"):
         registry, registry_path, digest = load_registry(registry_path)
         validate_plan(plan, registry)
+        plan = capture_capability_authorizations(plan)
         if not isinstance(goal, str) or not goal.strip() or not isinstance(acceptance, list) or not acceptance:
             raise ValueError("Explicit goal and acceptance criteria required")
         criteria = []
@@ -495,11 +542,43 @@ class RunStore:
             self.write_atomic(state)
         return state
 
-    def block_unavailable(self, revision, skill_id, reason, step_id=None, parent_frame_id=None):
+    def block_unavailable(self, revision, skill_id, reason, step_id=None, parent_frame_id=None, category="missing_file"):
         def change(state):
             if state["status"] != "running" or not reason or not reason.strip() or (step_id is None) == (parent_frame_id is None):
                 raise ValueError("Missing capability requires a scoped step or active parent and reason")
             index = {s["id"]: s for s in state["registry"]["skills"] + state["temporary_skills"]}
+            if category == "registration_missing":
+                if skill_id in index or skill_id in {"develop-system", "ask-matt"}:
+                    raise ValueError("Registration correction cannot replace an existing or disabled capability")
+                parent = None
+                if parent_frame_id is not None:
+                    parent = next((f for f in state["frames"] if f["frame_id"] == parent_frame_id and f["status"] == "running"), None)
+                    if not parent:
+                        raise ValueError("Missing active parent")
+                owner = step_id if step_id is not None else root_step_id(state, parent_frame_id)
+                step = next((s for s in state["plan"] if s["step_id"] == owner), None)
+                if not step or (parent is None and (step["status"] not in {"pending", "blocked", "failed", "interrupted"}
+                        or skill_id not in declared_helpers(index, step["skill_id"]))):
+                    raise ValueError("Missing registration must belong to selected work")
+                authorized, source = authorized_helper(state, owner, skill_id)
+                if parent is not None:
+                    obligation = {"skill_id": skill_id, "skill_path": source["skill_path"], "skill_sha256": source["sha256"]}
+                    previous = next((d for d in parent["completion_obligations"] if d["skill_id"] == skill_id), None)
+                    if previous and previous != obligation:
+                        raise ValueError("Existing parent obligation uses another source")
+                    if not previous:
+                        parent["completion_obligations"].append(obligation)
+                else:
+                    step["status"] = "blocked"
+                state["restrictions"].append({"kind": "missing_skill", "category": category,
+                    "restriction_id": uuid.uuid4().hex, "skill_id": skill_id, "step_id": owner,
+                    "frame_id": parent_frame_id, "reason": reason, "source": source,
+                    "authorization_reference": authorized["authorization_reference"]})
+                state["next_decision"] = {"action": "missing_skill", "category": category,
+                    "restriction_id": state["restrictions"][-1]["restriction_id"], "step_id": owner}
+                return state
+            if category != "missing_file":
+                raise ValueError("Unknown missing capability category")
             if skill_id not in index or not index[skill_id]["enabled"] or skill_id in {"develop-system", "ask-matt"}:
                 raise ValueError("Unknown specialist capability")
             if step_id is not None:
@@ -533,16 +612,52 @@ class RunStore:
             self.write_atomic(new)
             return new
 
-    def register(self, revision, descriptor):
+    def register(self, revision, descriptor, restriction_id=None):
         def change(state):
-            if state["status"] != "running":
+            holds = [r for r in state["restrictions"] if r.get("category") == "registration_missing"
+                     and r["skill_id"] == descriptor.get("id")]
+            correction = next((r for r in holds if r["restriction_id"] == restriction_id), None)
+            if restriction_id is not None and correction is None:
+                raise ValueError("Correction must name this run's matching capability restriction")
+            if holds and correction is None:
+                raise ValueError("Registration must explicitly identify the pending correction")
+            if state["status"] not in ({"running", "paused"} if correction else {"running"}):
                 raise ValueError("Resume before registration")
+            index = {s["id"]: s for s in state["registry"]["skills"] + state["temporary_skills"]}
+            if descriptor.get("id") in index or descriptor.get("id") in state.get("selected_skills", {}):
+                raise ValueError("Registration cannot replace a same-name, disabled or selected capability")
             merged = copy.deepcopy(state["registry"])
             merged["skills"] += state["temporary_skills"] + [descriptor]
-            errors = validate(merged, Path(state["registry_path"]).parent)
+            errors = validate(merged, Path(state["registry_path"]).parent, package=correction is None)
             if errors:
                 raise ValueError("; ".join(errors))
+            if correction:
+                if descriptor.get("role") != "auxiliary" or descriptor.get("enabled") is not True:
+                    raise ValueError("A missing helper correction must register an enabled auxiliary")
+                authorized, source = authorized_helper(state, correction["step_id"], descriptor["id"])
+                if source != correction["source"] or authorized["authorization_reference"] != correction["authorization_reference"]:
+                    raise ValueError("Correction no longer matches its recorded authorization and source")
             state["temporary_skills"].append(copy.deepcopy(descriptor))
+            if correction:
+                selection = preflight_skills(state, self.project, descriptor["id"])
+                actual = {key: selection[descriptor["id"]][key] for key in ("skill_path", "sha256", "policy")}
+                if actual != source:
+                    raise ValueError("Registration cannot adopt an unauthorized source or version")
+                state["selected_skills"][descriptor["id"]] = source
+                resolved = []
+                for hold in holds:
+                    try:
+                        permit, current = authorized_helper(state, hold["step_id"], hold["skill_id"])
+                    except (OSError, ValueError):
+                        continue
+                    if hold["source"] == current == source and permit["authorization_reference"] == hold["authorization_reference"]:
+                        resolved.append(hold["restriction_id"])
+                state["restrictions"] = [r for r in state["restrictions"] if r.get("restriction_id") not in resolved]
+                state.setdefault("registration_corrections", []).append({
+                    "skill_id": descriptor["id"], "restriction_ids": resolved, "source": source,
+                    "authorization_reference": authorized["authorization_reference"], "from_revision": state["revision"]})
+                state["next_decision"] = ({"action": "paused", "user_reason": state["control"]["user_reason"]}
+                    if state["control"]["status"] == "paused" else {"action": "reassess_ready", "restriction_ids": resolved})
             return state
         return self.mutate(revision, change)
 
@@ -553,12 +668,13 @@ class RunStore:
             merged = copy.deepcopy(state["registry"])
             merged["skills"] += state["temporary_skills"]
             validate_plan(state["plan"] + steps, merged)
+            qualified_steps = capture_capability_authorizations(steps)
             known = {f["frame_id"] for f in state["frames"] if f["status"] != "superseded"}
             for step in steps:
                 targets = step.get("resolves_frames", [])
                 if not isinstance(targets, list) or any(not isinstance(t, str) or t not in known for t in targets):
                     raise ValueError("Follow-up must reference current frames")
-            state["plan"].extend({**s, "status": "pending", "required": s.get("required", True)} for s in steps)
+            state["plan"].extend({**s, "status": "pending", "required": s.get("required", True)} for s in qualified_steps)
             state.setdefault("plan_changes", []).append({"reason": reason, "added_steps": [s["step_id"] for s in steps]})
             state["next_decision"] = {"action": "select_ready"}
             return state
@@ -910,7 +1026,7 @@ class RunStore:
                 raise ValueError("User pause requires a real user continuation reference")
             remaining = []
             for restriction in state["restrictions"]:
-                if restriction["kind"] == "missing_skill":
+                if restriction["kind"] == "missing_skill" and restriction.get("category") != "registration_missing":
                     try:
                         select_registered_skill(state, self.project, restriction["skill_id"])
                     except (OSError, ValueError):
@@ -1054,6 +1170,8 @@ def main():
     parser.add_argument("--optional", action="store_true")
     parser.add_argument("--worktree", help="Explicit authorized worktree scope JSON for this dispatch")
     parser.add_argument("--reason")
+    parser.add_argument("--category", choices=["missing_file", "registration_missing"], default="missing_file")
+    parser.add_argument("--restriction-id")
     parser.add_argument("--user-reference")
     parser.add_argument("--input", action="append", default=[])
     parser.add_argument("--evidence", action="append", default=[])
@@ -1081,9 +1199,9 @@ def main():
                     worktree=read(args.worktree) if args.worktree else None)
             elif args.command == 'attach-grill':value = store.attach_grill(args.revision,read(args.payload),args.input,args.skill_path)
             elif args.command == 'route-grill':value = store.route_grill(args.revision,args.event_id)
-            elif args.command == "block":value = store.block_unavailable(args.revision,args.skill_id,args.reason,args.step_id,args.parent_frame_id)
+            elif args.command == "block":value = store.block_unavailable(args.revision,args.skill_id,args.reason,args.step_id,args.parent_frame_id,args.category)
             elif args.command == "return":value = store.receive(args.revision,read(args.payload))
-            elif args.command == "register":value = store.register(args.revision,read(args.payload))
+            elif args.command == "register":value = store.register(args.revision,read(args.payload),args.restriction_id)
             elif args.command == "extend-plan":value = store.extend_plan(args.revision,read(args.payload),args.reason)
             elif args.command == "assess":value = store.assess(args.revision,args.frame_id,args.resolution,args.evidence,args.source_frame_id)
             elif args.command == "resume":value = store.resume(args.revision,args.user_reference)
