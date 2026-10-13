@@ -430,6 +430,8 @@ class RunStore:
             parent = next((f for f in state["frames"] if f["frame_id"] == parent_frame_id), None)
             if parent is None or parent["status"] != "running":
                 raise ValueError("Parent is not active")
+            if active_root_work(state) - {root_step_id(state, parent_frame_id)}:
+                raise ValueError("Another root owns the available execution capacity")
             if child_restricted(state, parent, skill_id):
                 raise ValueError("Child is affected by unresolved scoped work")
             supersede_tree(state["frames"], {prior["frame_id"] for prior in state["frames"]

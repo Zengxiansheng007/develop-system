@@ -180,6 +180,23 @@ class ScopedWorkflowTests(unittest.TestCase):
         with self.assertRaises(ValueError):self.store.receive(state["revision"],self.event(frame))
         self.assertEqual(before,self.store.path.read_bytes())
 
+    def test_new_child_cannot_reclaim_capacity_while_another_root_is_running(self):
+        state=self.dispatch(self.create())
+        parent=state["frames"][-1]
+        state=self.dispatch(state,"code-review",parent=parent["frame_id"])
+        blocked=state["frames"][-1]
+        state=self.store.receive(state["revision"],self.event(blocked,"blocked"))
+        state=self.dispatch(state,"domain-modeling","b")
+        independent=state["frames"][-1]
+        before=self.store.path.read_bytes()
+        with self.assertRaises(ValueError):
+            self.dispatch(state,"tdd",parent=parent["frame_id"])
+        self.assertEqual(before,self.store.path.read_bytes())
+        # In-flight returns remain valid; capacity becomes available after B returns.
+        state=self.store.receive(state["revision"],self.event(independent))
+        state=self.dispatch(state,"tdd",parent=parent["frame_id"])
+        self.assertEqual(state["frames"][-1]["skill_id"],"tdd")
+
 
 
 
