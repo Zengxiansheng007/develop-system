@@ -12,8 +12,8 @@ from pathlib import Path
 import re
 import uuid
 
-from codex_runtime import accept_result, resolve_skill
-from validate_registry import validate
+from codex_runtime import accept_result, resolve_skill, children_resolved
+from validate_registry import validate, required_closure
 from grill_routing import decide_entry, decide_root_route
 from record_check import validate_record
 from check_binding import bind_worktree, validate_managed, validate_reference_candidate, validate_worktree
@@ -52,7 +52,7 @@ def evidence_is_current(item):
 def load_registry(path):
     path = Path(path).resolve(strict=True)
     data = json.loads(path.read_text(encoding="utf-8"))
-    errors = validate(data, path.parent)
+    errors = validate(data, path.parent, package=False)
     if errors:
         raise ValueError("; ".join(errors))
     return data, str(path), hashlib.sha256(path.read_bytes()).hexdigest()
@@ -286,12 +286,26 @@ def select_registered_skill(state, project, skill_id, skill_path=None):
     descriptor = index.get(skill_id)
     if not descriptor or not descriptor["enabled"] or skill_id in {"develop-system", "ask-matt"}:
         raise ValueError("Skill is not an enabled execution capability")
-    selected_path = skill_path or descriptor.get("path")
+    pinned = state.get('selected_skills', {}).get(skill_id)
+    selected_path = skill_path or (pinned['skill_path'] if pinned else descriptor.get("path"))
     if selected_path and not Path(selected_path).is_absolute():
         selected_path = Path(state["registry_path"]).parent / selected_path
     roots = [project / ".agents/skills", project / ".codex/skills", Path.home() / ".agents/skills",
              Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))) / "skills"]
-    return resolve_skill(skill_id, roots=roots, explicit=selected_path)
+    source = resolve_skill(skill_id, roots=roots, explicit=selected_path)
+    if pinned and any(source[key] != pinned[key] for key in ('skill_path', 'sha256', 'policy')):
+        raise ValueError('Selected skill version changed; explicit requalification required: ' + skill_id)
+    return source
+
+
+def preflight_skills(state, project, skill_id, skill_path=None):
+    if state['registry'].get('schema_version') != 3:
+        raise ValueError('Registry v2 needs explicit migration; missing duties are not empty duties')
+    merged = copy.deepcopy(state['registry'])
+    merged['skills'] += state['temporary_skills']
+    return required_closure(merged, [skill_id],
+        lambda name, item: select_registered_skill(state, project, name, skill_path if name == skill_id else None),
+        prerequisites=True)
 
 
 def validate_system_conclusions(state, item):
@@ -376,6 +390,11 @@ def explain_system_restrictions(state):
 
 
 class RunStore:
+    def preflight(self, skill_id, skill_path=None):
+        """Read-only qualification of the selected closure using dispatch's resolver."""
+        state = self.read()
+        return preflight_skills(state, self.project, skill_id, skill_path)
+
     @staticmethod
     def inspect_grill_entry(context):
         """Scan only the specified project's runs; leave all candidates byte-for-byte intact."""
@@ -465,7 +484,7 @@ class RunStore:
         state = {"schema_version": 4, "controller_policy": "dispatch-only", "mode": "execute", "entrypoint": "develop-system", "run_id": self.run_id,
                  "control": {"status": "running", "user_reason": None}, "restrictions": [],
                  "project_root": str(self.project), "goal": goal, "scope": [goal], "revision": 1, "status": "running",
-                 "registry_path": registry_path, "registry_sha256": digest, "registry": registry, "temporary_skills": [],
+                 "registry_path": registry_path, "registry_sha256": digest, "registry": registry, "temporary_skills": [], "selected_skills": {},
                  "plan": [{**s, "status": "pending", "required": s.get("required", True)} for s in plan],
                  "acceptance": criteria,
                  "frames": [], "events": [], "assessments": [], "next_decision": {"action": "select_ready"}}
@@ -501,8 +520,10 @@ class RunStore:
     def mutate(self, expected_revision, operation):
         with self.locked():
             old = self.read()
-            if old["schema_version"] != 4:
+            if old["schema_version"] != 4 or old['registry'].get('schema_version') != 3:
                 raise ValueError("Legacy state is read-only until explicit migration")
+            if any(not isinstance(f.get('completion_obligations'), list) for f in old['frames']):
+                raise ValueError('Missing completion obligations require explicit migration')
             if old["revision"] != expected_revision:
                 raise ValueError("Revision conflict; reread state before retrying")
             new = operation(copy.deepcopy(old))
@@ -574,14 +595,25 @@ class RunStore:
                 if prior.get("parent_frame_id") == parent_frame_id and prior["skill_id"] == skill_id
                 and prior["status"] in {"failed", "blocked", "interrupted", "stale"} and not prior.get("needs_assessment")})
         try:
-            selected = select_registered_skill(state, self.project, skill_id, skill_path)
+            selection = preflight_skills(state, self.project, skill_id, skill_path)
+            selected = selection[skill_id]
             mode = "skill"
         except FileNotFoundError:
             raise FileNotFoundError("Missing specialist skill; dispatch-only controller cannot execute inline: " + skill_id)
         captured = [file_evidence(item) for item in inputs]
+        obligations = []
+        for helper in descriptor["required_calls"]:
+            source = selection[helper]
+            obligations.append({"skill_id": helper, "skill_path": source["skill_path"], "skill_sha256": source["sha256"]})
+        if parent_frame_id and any(duty["skill_id"] == skill_id for duty in parent["completion_obligations"]):
+            required = True
         prerequisites = (step if step_id is not None else parent).get("shared_preconditions", [])
         if selected["skill_path"]:
             captured.append(file_evidence(selected["skill_path"]))
+        if selected['policy']:
+            captured.append(file_evidence(selected['policy']))
+        for name, source in selection.items():
+            state['selected_skills'][name] = {key: source[key] for key in ('skill_path', 'sha256', 'policy')}
         state["frames"].append({"frame_id": uuid.uuid4().hex, "parent_frame_id": parent_frame_id, "step_id": step_id,
                                 "protocol_version": 1,
                                 "shared_preconditions": copy.deepcopy(prerequisites),
@@ -589,6 +621,7 @@ class RunStore:
                                 "authorization_reference": (step if step_id is not None else parent).get("authorization_reference"),
                                 "skill_id": skill_id, "skill_path": selected["skill_path"], "skill_sha256": selected["sha256"], "mode": mode,
                                 "done_when": descriptor["done_when"], "status": "running", "required": step["required"] if step_id is not None else required, "input_version": input_version,
+                                "completion_obligations": obligations,
                                 "inputs": captured, "artifacts": [], "needs_assessment": False})
         frame = state["frames"][-1]
         frame["worktree_binding"] = (bind_worktree(self.project, state["run_id"], frame["frame_id"],
@@ -969,6 +1002,8 @@ class RunStore:
             relevant = [f for f in state["frames"] if f["status"] != "superseded"]
             if any(not frame_resolved(f) for f in relevant):
                 raise ValueError("Unresolved skill work or findings remain")
+            if any(not children_resolved(f, relevant) for f in relevant):
+                raise ValueError('Mandatory helper obligations remain unresolved')
             if any(not frame_is_current(state, f) for f in relevant):
                 raise ValueError("Revalidate changed artifacts before completion")
             current_ids = {f["frame_id"] for f in relevant}

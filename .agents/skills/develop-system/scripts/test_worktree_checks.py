@@ -44,6 +44,8 @@ class WorktreeCheckTests(unittest.TestCase):
             p=self.root/(item['id']+'.md')
             p.write_text('---\nname: '+item['id']+'\ndescription: fixture\n---\n',encoding='utf-8')
             item['path']=str(p)
+            # Synthetic evidence fixture; default mandatory-helper behavior has its own public tests.
+            item['required_calls']=[]
         self.registry.write_text(json.dumps(data),encoding='utf-8')
         self.store=RunStore(self.project,'managed-test')
         self.state=self.store.create('synthetic check goal',[{'step_id':'a','skill_id':'implement'}],['verified'],self.registry)

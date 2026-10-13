@@ -17,6 +17,8 @@ class GrillRoutingTests(unittest.TestCase):
             path = self.root / (skill['id'] + '.md')
             path.write_text('---\nname: ' + skill['id'] + '\ndescription: fixture\n---\n', encoding='utf-8')
             skill['path'] = str(path)
+            # Synthetic routing fixture; no unconditional auxiliary duties in this test registry.
+            skill['required_calls'] = []
         self.registry = self.root / 'registry.json'
         self.registry.write_text(json.dumps(registry), encoding='utf-8')
         self.store = RunStore(self.root, 'checkout')

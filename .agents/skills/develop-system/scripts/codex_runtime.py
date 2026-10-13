@@ -16,6 +16,9 @@ def resolve_skill(name, roots=(), explicit=None, catalog=None):
         candidates = [Path(catalog[name])]
     else:
         candidates = [Path(root) / name / "SKILL.md" for root in roots]
+        existing = {candidate.resolve() for candidate in candidates if candidate.is_file()}
+        if len(existing) > 1:
+            raise ValueError('Ambiguous skill sources require an explicit selection: ' + name)
     for candidate in candidates:
         if candidate.is_dir():
             candidate = candidate / "SKILL.md"
@@ -26,7 +29,22 @@ def resolve_skill(name, roots=(), explicit=None, catalog=None):
         match = re.match(r"^---\s*\n(.*?)\n---", text, re.S)
         if not match or not re.search(r"^name:\s*[\"']?" + re.escape(name) + r"[\"']?\s*$", match.group(1), re.M):
             raise ValueError("Selected skill name does not match its file")
-        return {"skill_id": name, "skill_path": str(candidate.resolve()), "sha256": hashlib.sha256(content).hexdigest(), "content": text}
+        def boolean(body, field, default):
+            values = re.findall(r'^\s*' + re.escape(field) + r':\s*([^\n#]+)', body, re.M)
+            if not values:
+                return default
+            if len(values) != 1 or values[0].strip() not in {'true', 'false'}:
+                raise ValueError('Invalid invocation policy: ' + field)
+            return values[0].strip() == 'true'
+        callable_skill = not boolean(match.group(1), 'disable-model-invocation', False)
+        policy = candidate.parent / 'agents/openai.yaml'
+        policy_evidence = None
+        if policy.is_file():
+            policy_bytes = policy.read_bytes()
+            callable_skill = callable_skill and boolean(policy_bytes.decode('utf-8-sig'), 'allow_implicit_invocation', True)
+            policy_evidence = {'path': str(policy.resolve()), 'sha256': hashlib.sha256(policy_bytes).hexdigest()}
+        return {"skill_id": name, "skill_path": str(candidate.resolve()), "sha256": hashlib.sha256(content).hexdigest(),
+                "content": text, 'callable': callable_skill, 'policy': policy_evidence}
     # Explicit/catalog paths are authoritative; do not silently choose another version.
     raise FileNotFoundError(f"Skill file unavailable: {name}")
 
@@ -40,6 +58,22 @@ def delegation_mode(authorized, available, free_slots, requested_workers=1, in_c
 
 
 RETURN_STATUSES = {"completed", "failed", "blocked", "waiting_user", "skipped", "cancelled"}
+
+
+def children_resolved(frame, frames):
+    """Current-parent duties include helpers that have not been dispatched yet."""
+    obligations = frame.get("completion_obligations")
+    if not isinstance(obligations, list):
+        return False
+    children = [child for child in frames if child.get("parent_frame_id") == frame["frame_id"]
+                and child["status"] != "superseded"]
+    def resolved(child):
+        return (child["status"] == "completed" or (child["status"] == "skipped" and child.get("required") is False
+            and child.get("skip_reason"))) and not child.get("needs_assessment")
+    return all(resolved(child) for child in children) and all(any(
+        child["status"] == "completed" and child.get("required") is True and resolved(child)
+        and all(child.get(key) == duty[key] for key in ("skill_id", "skill_path", "skill_sha256"))
+        for child in children) for duty in obligations)
 
 
 def accept_result(state, result):
@@ -82,10 +116,7 @@ def accept_result(state, result):
     parent_id = frame.get("parent_frame_id")
     if parent_id is not None and (parent_id not in frames or frames[parent_id]["status"] != "running"):
         raise ValueError("Parent frame is missing or no longer active")
-    children = [item for item in frames.values() if item.get("parent_frame_id") == frame["frame_id"] and item["status"] != "superseded"]
-    def resolved(item):
-        return (item["status"] == "completed" or (item["status"] == "skipped" and item.get("required") is False and item.get("skip_reason"))) and not item.get("needs_assessment")
-    if result["status"] == "completed" and any(not resolved(item) for item in children):
+    if result["status"] == "completed" and not children_resolved(frame, list(frames.values())):
         raise ValueError("Parent cannot complete with unresolved child work")
     frame["status"] = result["status"]
     frame["needs_assessment"] = bool(result["findings"] or result["blockers"])
@@ -96,8 +127,7 @@ def accept_result(state, result):
     elif result["findings"] or result["blockers"]:
         decision = {"action": "assess_findings", "frame_id": frame["frame_id"], "parent_frame_id": parent_id}
     elif parent_id is not None:
-        siblings = [item for item in frames.values() if item.get("parent_frame_id") == parent_id and item["status"] != "superseded"]
-        if all(resolved(item) for item in siblings):
+        if children_resolved(frames[parent_id], list(frames.values())):
             decision = {"action": "resume_parent", "frame_id": parent_id}
         else:
             decision = {"action": "collect_children", "frame_id": parent_id}

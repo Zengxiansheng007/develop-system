@@ -18,6 +18,8 @@ class DurableWorkflowTests(unittest.TestCase):
             path = self.root / (item["id"] + ".md")
             path.write_text("---\nname: " + item["id"] + "\ndescription: fixture\n---\n", encoding="utf-8")
             item["path"] = str(path)
+            # Synthetic workflow fixture: optional child graphs are selected by each test.
+            item['required_calls'] = []
         self.registry.write_text(json.dumps(data), encoding="utf-8")
         self.output = self.root / "output.txt"
         self.output.write_text("verified output", encoding="utf-8")

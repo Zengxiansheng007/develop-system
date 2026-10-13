@@ -9,13 +9,13 @@ description: "Conduct a retrospective on a coding session."
 
 正文的 Skill 工具及 `/skill` 写法，在 Codex 中按真实路径读取对应 SKILL.md。嵌套专业工作登记子帧，结果先回流总路由。委派有授权和可用工具时使用真实子代理，否则切换到专业技能顺序执行；仅修改技能文件不启动子代理。分支、提交、远程工单和 PR 操作遵守用户授权与实际仓库条件，不假定已获发布或外部写入授权。
 
-本技能依据本次会话证据提出规范、工具与自动检查的改进；加载 writing-for-agents 作为辅助技能并回流。复盘建议不自动成为当前必做任务，新增实现需处于用户授权范围。
+本技能依据本次会话证据提出规范、工具与自动检查的改进；受管运行的无条件辅助义务以 [registry.json](../develop-system/registry.json) 本项 required_calls 为唯一声明。复盘建议不自动成为当前必做任务，新增实现需处于用户授权范围。
 
 The user has asked for a **retrospective**. You are suggesting improvements to the coding agent's **environment** to improve future runs.
 
 ## Steps
 
-1. Call the Skill tool with `writing-for-agents` for the writing style guide.
+1. Apply the writing style guidance through the auxiliary duty declared for this skill in [registry.json](../develop-system/registry.json). Return the actual application summary before closing the retrospective.
 
 2. Read the primary sources for the session the user specifies. This may mean searching through session logs on this machine. If the user doesn't specify a session, default to the current one.
 

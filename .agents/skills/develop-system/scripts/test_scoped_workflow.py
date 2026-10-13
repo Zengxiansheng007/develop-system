@@ -13,6 +13,8 @@ class ScopedWorkflowTests(unittest.TestCase):
         self.root=Path(temp.name)
         registry=json.loads((SKILL_ROOT/"registry.json").read_text(encoding="utf-8"))
         for item in registry["skills"]:
+            # State scenarios declare their own synthetic helper obligations.
+            item["required_calls"]=[]
             path=self.root/(item["id"]+".md")
             path.write_text("---\nname: "+item["id"]+"\ndescription: synthetic fixture\n---\n",encoding="utf-8")
             item["path"]=str(path)

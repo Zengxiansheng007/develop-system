@@ -3,6 +3,10 @@ name: writing-for-agents
 description: Writing documents for agents. Use when creating or editing skills, or modifying AGENTS.md or CLAUDE.md.
 ---
 
+## Codex application and return
+
+Inside an explicitly started develop-system run, apply this reference in the assigned auxiliary frame and follow the [return protocol](../develop-system/references/codex-runtime.md). Read the selected source, apply its guidance to the current document, and return an application summary with the actual document artifacts and source identity. A file load alone is not application; without a command, leave checks empty. Outside that run, use the reference independently and return to the caller without creating managed state.
+
 Reference for writing any document an agent consumes: a skill, an `AGENTS.md` / `CLAUDE.md`, a doc reached by a pointer. The packaging differs; the writing does not: the same levers make each one predictable, since the agent takes the same _process_ every run rather than producing the same output.
 
 When the document you're writing is a skill, read [`SKILL-MECHANICS.md`](SKILL-MECHANICS.md) for frontmatter, invocation choice, and router skills.

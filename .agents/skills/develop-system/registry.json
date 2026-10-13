@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "controller": "develop-system",
   "return_to": "develop-system",
   "stages": [
@@ -64,7 +64,8 @@
       "requires": [],
       "outputs": [
         "流程状态与路由决定"
-      ]
+      ],
+      "required_calls": []
     },
     {
       "id": "setup-matt-pocock-skills",
@@ -78,7 +79,9 @@
       "requires": [],
       "outputs": [
         "项目工作约定"
-      ]
+      ],
+      "required_calls": [],
+      "path": "../setup-matt-pocock-skills/SKILL.md"
     },
     {
       "id": "triage",
@@ -92,7 +95,9 @@
       "requires": [],
       "outputs": [
         "可实施的问题记录"
-      ]
+      ],
+      "required_calls": [],
+      "path": "../triage/SKILL.md"
     },
     {
       "id": "grill-with-docs",
@@ -112,7 +117,9 @@
         "需求与验收条件",
         "必要术语和决策",
         "当前文档版本、确认依据及路线建议"
-      ]
+      ],
+      "required_calls": [],
+      "path": "../grill-with-docs/SKILL.md"
     },
     {
       "id": "matt-research",
@@ -127,7 +134,8 @@
       "outputs": [
         "带引用的调研结论"
       ],
-      "path": "../research/SKILL.md"
+      "path": "../research/SKILL.md",
+      "required_calls": []
     },
     {
       "id": "domain-modeling",
@@ -141,7 +149,9 @@
       "requires": [],
       "outputs": [
         "领域规则与术语"
-      ]
+      ],
+      "required_calls": [],
+      "path": "../domain-modeling/SKILL.md"
     },
     {
       "id": "wayfinder",
@@ -155,7 +165,9 @@
       "requires": [],
       "outputs": [
         "决策路线及未决项"
-      ]
+      ],
+      "required_calls": [],
+      "path": "../wayfinder/SKILL.md"
     },
     {
       "id": "prototype",
@@ -169,7 +181,9 @@
       "requires": [],
       "outputs": [
         "原型与设计结论"
-      ]
+      ],
+      "required_calls": [],
+      "path": "../prototype/SKILL.md"
     },
     {
       "id": "codebase-design",
@@ -183,7 +197,9 @@
       "requires": [],
       "outputs": [
         "模块设计与接口约定"
-      ]
+      ],
+      "required_calls": [],
+      "path": "../codebase-design/SKILL.md"
     },
     {
       "id": "improve-codebase-architecture",
@@ -197,7 +213,11 @@
       "requires": [],
       "outputs": [
         "架构候选与影响报告"
-      ]
+      ],
+      "required_calls": [
+        "codebase-design"
+      ],
+      "path": "../improve-codebase-architecture/SKILL.md"
     },
     {
       "id": "to-spec",
@@ -211,7 +231,9 @@
       "requires": [],
       "outputs": [
         "可实施规格"
-      ]
+      ],
+      "required_calls": [],
+      "path": "../to-spec/SKILL.md"
     },
     {
       "id": "to-tickets",
@@ -225,7 +247,9 @@
       "requires": [],
       "outputs": [
         "任务与依赖图"
-      ]
+      ],
+      "required_calls": [],
+      "path": "../to-tickets/SKILL.md"
     },
     {
       "id": "implement",
@@ -240,7 +264,11 @@
       "outputs": [
         "实现产物",
         "验证证据"
-      ]
+      ],
+      "required_calls": [
+        "code-review"
+      ],
+      "path": "../implement/SKILL.md"
     },
     {
       "id": "implement-spec",
@@ -255,7 +283,9 @@
       "outputs": [
         "集成实现",
         "集成验证证据"
-      ]
+      ],
+      "required_calls": [],
+      "path": "../implement-spec/SKILL.md"
     },
     {
       "id": "tdd",
@@ -270,7 +300,9 @@
       "outputs": [
         "行为测试",
         "测试执行结果"
-      ]
+      ],
+      "required_calls": [],
+      "path": "../tdd/SKILL.md"
     },
     {
       "id": "diagnosing-bugs",
@@ -286,7 +318,9 @@
         "复现证据",
         "根因与修复",
         "回归结果"
-      ]
+      ],
+      "required_calls": [],
+      "path": "../diagnosing-bugs/SKILL.md"
     },
     {
       "id": "code-review",
@@ -300,7 +334,9 @@
       "requires": [],
       "outputs": [
         "评审结论与发现"
-      ]
+      ],
+      "required_calls": [],
+      "path": "../code-review/SKILL.md"
     },
     {
       "id": "pr",
@@ -315,7 +351,9 @@
       "outputs": [
         "PR描述",
         "约定的PR交付证据"
-      ]
+      ],
+      "required_calls": [],
+      "path": "../pr/SKILL.md"
     },
     {
       "id": "wizard",
@@ -330,7 +368,9 @@
       "outputs": [
         "人工操作向导",
         "人工步骤完成状态"
-      ]
+      ],
+      "required_calls": [],
+      "path": "../wizard/SKILL.md"
     },
     {
       "id": "retro",
@@ -344,7 +384,11 @@
       "requires": [],
       "outputs": [
         "流程与环境改进建议"
-      ]
+      ],
+      "required_calls": [
+        "writing-for-agents"
+      ],
+      "path": "../retro/SKILL.md"
     },
     {
       "id": "grilling",
@@ -358,6 +402,25 @@
       "requires": [],
       "outputs": [
         "用户确认的决策或待回答问题"
+      ],
+      "required_calls": [],
+      "path": "../grilling/SKILL.md"
+    },
+    {
+      "id": "writing-for-agents",
+      "stage": "delivery-retrospective",
+      "role": "auxiliary",
+      "enabled": true,
+      "return_to": "develop-system",
+      "fallback": "blocked",
+      "path": "../writing-for-agents/SKILL.md",
+      "when": "受管专业任务需要应用面向代理的文档写作指导",
+      "done_when": "实际载入选定指导，记录本次应用摘要及实际文档产物；无命令不造命令记录",
+      "requires": [],
+      "required_calls": [],
+      "outputs": [
+        "实际载入与应用摘要",
+        "必要的文档产物"
       ]
     }
   ],

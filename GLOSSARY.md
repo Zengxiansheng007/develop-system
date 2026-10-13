@@ -4,6 +4,20 @@
 
 ## Language
 
+以下助手职责术语采用[实施票 #7](https://github.com/Zengxiansheng007/develop-system/issues/7)及首批规格既定含义。
+
+**必需辅助调用**：
+某项专业工作每次执行时都必须完成的辅助职责；它属于该工作的完成要求，与开始工作之前的前置条件分别判断。
+_Avoid_: 建议路线、派发前置
+
+**本次完成义务**：
+某次父任务为完成其专业职责必须获得的辅助结论，归属于该父任务及本次输入；另一任务的成果不能代替。
+_Avoid_: 历史助手通过、文件已经存在
+
+**条件辅助调用**：
+专业技能根据本次工作选择的辅助职责；未选择时不产生义务，选择后的必要性由本次任务明确。
+_Avoid_: 无条件必需调用、普通参考
+
 以下工作树与检查术语采用[实施票 #5](https://github.com/Zengxiansheng007/develop-system/issues/5)、[实施票 #6](https://github.com/Zengxiansheng007/develop-system/issues/6)及首批规格既定含义。
 
 **工作树绑定**：

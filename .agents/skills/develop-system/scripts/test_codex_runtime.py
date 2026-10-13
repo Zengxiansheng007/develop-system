@@ -6,7 +6,7 @@ from codex_runtime import accept_result, delegation_mode, resolve_skill
 
 
 def frame(name, skill, parent=None):
-    return {"protocol_version": 1, "frame_id": name, "skill_id": skill, "parent_frame_id": parent, "status": "running"}
+    return {"protocol_version": 1, "frame_id": name, "skill_id": skill, "parent_frame_id": parent, "status": "running", "completion_obligations": []}
 
 
 def event(item, status="completed"):
@@ -104,7 +104,9 @@ class RuntimeTests(unittest.TestCase):
                 folder = root / label / "matt-research"
                 folder.mkdir(parents=True)
                 (folder / "SKILL.md").write_text("---\nname: matt-research\ndescription: test\n---\n" + label, encoding="utf-8")
-            resolved = resolve_skill("matt-research", [root / "project", root / "global"])
+            with self.assertRaisesRegex(ValueError, 'Ambiguous'):
+                resolve_skill("matt-research", [root / "project", root / "global"])
+            resolved = resolve_skill("matt-research", explicit=root / "project" / "matt-research" / "SKILL.md")
             self.assertIn("project", resolved["skill_path"])
             explicit = root / "global" / "matt-research" / "SKILL.md"
             self.assertEqual(resolve_skill("matt-research", explicit=explicit)["skill_path"], str(explicit.resolve()))

@@ -42,7 +42,7 @@ return --payload <结果文件> 的结构见 [统一执行协议](codex-runtime.
 - 已失效或中断旧帧由明确重新分派替代受影响后代，旧结果不能覆盖新帧。
 - 环境健康由对应专业技能实际验证；哈希一致不证明服务存活。
 - 同技能/输入/阻塞两次无进展停止重试；用户明确暂停/取消时 pause/cancel --reason，完成或取消 run 不恢复。
-- 当前 T01–T05 候选创建 state v4，registry 仍为 v2；新帧及回流必须携带 protocol_version: 1。授权工作树检查记录 v2、当前候选失效与评审引用见[机器检查记录](check-records.md)。v3 可 show，只读状态不能 dispatch/return/resume/control/complete；v1/v2 仍拒绝自动续跑。显式迁移、旧证据核验复用和 registry v3 由后续票交付，不能据此候选采用到旧运行。
+- 当前 T01–T06 候选创建 state v4、registry v3；新帧及回流必须携带 protocol_version: 1。必需辅助义务及只读 RunStore.preflight 见[扩展接口](extensions.md)，授权工作树检查记录和当前候选资格见[机器检查记录](check-records.md)。state v3 或 registry v2 的旧快照可读取但不能续写；缺义务字段不能当作空义务。显式迁移和旧证据核验复用由 #11 交付，运行登记修正由 #8 交付，不能据此候选采用到旧运行。
 
 局部限制、就绪与完成的含义见[作用范围](scoped-state.md)。
 
