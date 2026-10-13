@@ -11,7 +11,7 @@
 - independent：按独立访谈执行，不 init。当前文档确认后列出 to-spec 和 implement、各自产物及推荐原因，停止等待明确选择。确认文档或“全部采用”不等于选择技能。
 - managed：由调度器登记或复用帧，再让 grill 执行；不得直接写入结果或跳过专业父任务。
 - clarify：说明具体归属或恢复缺口，等待真实答复；候选不写入。
-- resume：先处理原等待/阻塞条件或过期证据，再调用既有 resume 并重新检查。paused 必须明确要求恢复；recovery_ready/resume_paused 只记录真实恢复依据，不由时间或工具默认填 true。
+- resume：先处理原等待/阻塞条件或过期证据，再调用 resume 并重新检查。paused 必须明确要求恢复并传 --user-reference；recovery_ready/resume_paused 只记录真实恢复依据，不由时间或工具默认填 true。
 
 纯决策接口 grill_routing.decide_entry 接收上下文与只读候选；independent_finish 接收已保存的交付对象、当前版本确认和后续显式 choice。交付对象含 document、version、confirmation_reference、checklist；choice 只能在真实后续选择时填写 to-spec / implement。
 

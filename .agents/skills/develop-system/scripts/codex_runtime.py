@@ -48,8 +48,9 @@ def accept_result(state, result):
         raise ValueError("Legacy state requires explicit migration before accepting results")
     if state.get("mode", "execute") != "execute" or result.get("skill_id") in {"ask-matt", "develop-system"}:
         raise ValueError("Navigation cannot write execution state")
-    if state.get("status") != "running" or state.get("control", {}).get("status") != "running":
-        raise ValueError("Run must be explicitly resumed before accepting results")
+    control = state.get("control", {}).get("status")
+    if control not in {"running", "paused"} or state.get("status") != control:
+        raise ValueError("Only active or user-paused runs can accept results")
     required = {"event_id", "run_id", "frame_id", "parent_frame_id", "skill_id", "status", "return_to", "completion_checked", "artifacts", "checks", "findings", "blockers"}
     if not required <= result.keys():
         raise ValueError("Incomplete return event")
@@ -103,5 +104,8 @@ def accept_result(state, result):
     else:
         decision = {"action": "assess_next", "frame_id": frame["frame_id"]}
     decision["return_to"] = "develop-system"
+    if control == "paused":
+        decision = {"action": "paused", "user_reason": state["control"]["user_reason"],
+                    "return_to": "develop-system"}
     updated["next_decision"] = decision
     return updated, decision

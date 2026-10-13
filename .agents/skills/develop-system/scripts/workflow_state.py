@@ -561,8 +561,9 @@ class RunStore:
                                    "frame_id": frame["frame_id"], "signature": list(current_signature)}
                     if restriction not in updated["restrictions"]:
                         updated["restrictions"].append(restriction)
-                    updated["next_decision"] = {"action": "stop_repeated_no_progress", "signature": list(current_signature),
-                                                "frame_id": frame["frame_id"], "scope": "local"}
+                    if updated["control"]["status"] == "running":
+                        updated["next_decision"] = {"action": "stop_repeated_no_progress", "signature": list(current_signature),
+                                                    "frame_id": frame["frame_id"], "scope": "local"}
             return updated
         return self.mutate(revision, change)
 
@@ -691,6 +692,8 @@ class RunStore:
 
     def assess(self, revision, frame_id, resolution, evidence, source_frame_id=None):
         def change(state):
+            if state["control"]["status"] != "running":
+                raise ValueError("Finding assessment requires explicit user continuation")
             frame = next(f for f in state["frames"] if f["frame_id"] == frame_id)
             if not frame.get("needs_assessment") or not resolution.strip() or not evidence:
                 raise ValueError("Assessment needs unresolved findings, a resolution and evidence")
@@ -724,10 +727,13 @@ class RunStore:
             return state
         return self.mutate(revision, change)
 
-    def resume(self, revision):
+    def resume(self, revision, user_reference=None):
         def change(state):
             if state["status"] in {"completed", "cancelled"}:
                 raise ValueError("Closed run needs a new explicit goal")
+            user_paused = state["control"]["status"] == "paused"
+            if user_paused and (not isinstance(user_reference, str) or not user_reference.strip()):
+                raise ValueError("User pause requires a real user continuation reference")
             remaining = []
             for restriction in state["restrictions"]:
                 if restriction["kind"] == "missing_skill":
@@ -754,7 +760,7 @@ class RunStore:
                         if ancestor.get("step_id"):
                             stale.add(ancestor["step_id"])
                         parent = ancestor.get("parent_frame_id")
-                elif frame["status"] in {"running", "waiting_user", "blocked"}:
+                elif not user_paused and frame["status"] in {"running", "waiting_user", "blocked"}:
                     frame["status"] = "interrupted"
                     if frame.get("step_id"):
                         stale.add(frame["step_id"])
@@ -781,6 +787,8 @@ class RunStore:
                     criterion.update(status="pending", evidence=[])
             state["status"] = "running"
             state["control"] = {"status": "running", "user_reason": None}
+            if user_paused:
+                state["control"]["resume_user_reference"] = user_reference
             state["next_decision"] = {"action": "revalidate_and_select", "invalidated_steps": sorted(stale),
                                       "note": "File hashes do not prove live runtime health; recheck environmental blockers and actual verification."}
             return state
@@ -842,6 +850,7 @@ def main():
     parser.add_argument("--require-original", action="store_true")
     parser.add_argument("--optional", action="store_true")
     parser.add_argument("--reason")
+    parser.add_argument("--user-reference")
     parser.add_argument("--input", action="append", default=[])
     parser.add_argument("--evidence", action="append", default=[])
     parser.add_argument("--resolution")
@@ -872,7 +881,7 @@ def main():
             elif args.command == "register":value = store.register(args.revision,read(args.payload))
             elif args.command == "extend-plan":value = store.extend_plan(args.revision,read(args.payload),args.reason)
             elif args.command == "assess":value = store.assess(args.revision,args.frame_id,args.resolution,args.evidence,args.source_frame_id)
-            elif args.command == "resume":value = store.resume(args.revision)
+            elif args.command == "resume":value = store.resume(args.revision,args.user_reference)
             elif args.command in {"pause", "cancel"}:value = store.control(args.revision,"paused" if args.command == "pause" else "cancelled",args.reason)
             else:value = store.complete(args.revision,read(args.payload))
         print(json.dumps(value,ensure_ascii=False,indent=2))

@@ -224,7 +224,7 @@ class DurableWorkflowTests(unittest.TestCase):
         state = self.create()
         state = self.store.control(state["revision"], "paused", "user requested pause")
         self.assertEqual(ready_steps(state), [])
-        state = self.store.resume(state["revision"])
+        state = self.store.resume(state["revision"], user_reference="synthetic user continuation")
         state = self.store.control(state["revision"], "cancelled", "user requested cancellation")
         with self.assertRaises(ValueError):
             self.store.resume(state["revision"])
