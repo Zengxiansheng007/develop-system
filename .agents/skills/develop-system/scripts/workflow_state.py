@@ -16,7 +16,7 @@ from codex_runtime import accept_result, resolve_skill
 from validate_registry import validate
 from grill_routing import decide_entry, decide_root_route
 from record_check import validate_record
-from check_binding import bind_worktree, validate_managed
+from check_binding import bind_worktree, validate_managed, validate_reference_candidate, validate_worktree
 
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 
@@ -107,12 +107,53 @@ def frame_evidence(frame):
             + [e for c in frame.get("acceptance_checks", []) for e in c["evidence"]])
 
 
+def validate_frame_check(state, frame, check, record, visiting=()):
+    actual = validate_record(record)
+    if check.get("status") != actual:
+        raise ValueError("Claimed check status contradicts recorded execution")
+    if "command" in check and check["command"] != record["command"]:
+        raise ValueError("Claimed check command contradicts recorded execution")
+    reference = check.get("reference")
+    if reference is None:
+        validate_managed(record, frame.get("worktree_binding"))
+        return
+    if frame["skill_id"] != "code-review" or not isinstance(reference, dict) or set(reference) != {"run_id", "frame_id", "record_id", "candidate_id"}:
+        raise ValueError("Review references require explicit original execution identities")
+    expected = {"run_id": state["run_id"], "frame_id": record.get("binding", {}).get("frame_id"),
+                "record_id": record.get("record_id"), "candidate_id": record.get("candidate", {}).get("candidate_id")}
+    if reference != expected or record.get("binding", {}).get("run_id") != state["run_id"] or actual != "passed":
+        raise ValueError("Review reference identity or passing qualification does not match")
+    source = next((f for f in state["frames"] if f["frame_id"] == reference["frame_id"]), None)
+    if not source or source["frame_id"] == frame["frame_id"] or source["status"] != "completed":
+        raise ValueError("Review requires a current completed original execution source")
+    if not any(c.get("reference") is None and c.get("record") == check["record"] for c in source.get("checks", [])):
+        raise ValueError("Reference must identify the original accepted execution record")
+    if not frame_is_current(state, source, visiting):
+        raise ValueError("Original execution evidence is no longer current")
+    validate_reference_candidate(record, frame.get("worktree_binding"))
+
+
+def frame_is_current(state, frame, visiting=()):
+    """A receipt's unchanged bytes do not establish its candidate's currentness."""
+    if frame["frame_id"] in visiting or not all(evidence_is_current(e) for e in frame_evidence(frame)):
+        return False
+    try:
+        if frame.get("worktree_binding") and not frame.get("checks"):
+            validate_worktree(frame["worktree_binding"])
+        for check in frame.get("checks", []):
+            record = json.loads(Path(check["record"]["path"]).read_text(encoding="utf-8"))
+            validate_frame_check(state, frame, check, record, (*visiting, frame["frame_id"]))
+        return True
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+
+
 def require_current(state):
     relevant = [f for f in state["frames"] if f["status"] not in {"superseded", "stale", "interrupted"}]
     ids = {f["frame_id"] for f in relevant}
     evidence = [e for f in relevant for e in frame_evidence(f)]
     evidence += [e for a in state["assessments"] if a["frame_id"] in ids for e in a["evidence"]]
-    if not all(evidence_is_current(e) for e in evidence):
+    if not all(evidence_is_current(e) for e in evidence) or not all(frame_is_current(state, f) for f in relevant):
         raise ValueError("Input or returned evidence changed; resume to invalidate dependencies before routing")
 
 
@@ -303,7 +344,7 @@ def reconcile_system_conclusions(state):
         source = next(f for f in state["frames"] if f["frame_id"] == event["frame_id"])
         latest = next(e for e in reversed(state["events"]) if e["frame_id"] == source["frame_id"])
         current = (source["status"] == "completed" and latest["event_id"] == event["event_id"]
-                   and all(evidence_is_current(e) for e in frame_evidence(source)))
+                   and frame_is_current(state, source))
         for conclusion in event["system_conclusions"]:
             identity = conclusion["restriction_id"]
             if conclusion["action"] == "set":
@@ -583,12 +624,7 @@ class RunStore:
                     raise ValueError("Command checks require a machine-generated record")
                 check["record"] = file_evidence(check["record"])
                 recorded = json.loads(Path(check["record"]["path"]).read_text(encoding="utf-8"))
-                actual = validate_record(recorded)
-                validate_managed(recorded, selected_frame.get("worktree_binding"))
-                if check.get("status") != actual:
-                    raise ValueError("Claimed check status contradicts recorded execution")
-                if "command" in check and check["command"] != recorded["command"]:
-                    raise ValueError("Claimed check command contradicts recorded execution")
+                validate_frame_check(state, selected_frame, check, recorded)
 
             if item.get('skill_id') == 'grill-with-docs' and item.get('status') == 'completed':
                 delivery = item.get('grill_delivery')
@@ -756,7 +792,7 @@ class RunStore:
                     and (s['status'] == 'pending' or
                          (s['status'] == 'completed' and set(s.get('depends_on', [])) <= finished
                           and any(f.get('step_id') == s['step_id'] and f['skill_id'] == skill and frame_resolved(f)
-                                  and f.get('artifacts') and all(evidence_is_current(e) for e in frame_evidence(f))
+                                  and f.get('artifacts') and frame_is_current(state, f)
                                   for f in state['frames'])))), None)
                 if reusable:
                     if reusable['status'] == 'pending':
@@ -811,8 +847,7 @@ class RunStore:
             declared = event.get("artifacts", []) + [e for c in event.get("acceptance_checks", []) for e in c["evidence"]]
             if any(not any(e["path"] == d["path"] and e["sha256"] == d["sha256"] for d in declared) for e in captured):
                 raise ValueError("Resolution evidence must belong to the specialist result")
-            source_evidence = frame_evidence(source)
-            if not all(evidence_is_current(e) for e in source_evidence):
+            if not frame_is_current(state, source):
                 raise ValueError("Resolution source is stale")
             state["assessments"].append({"frame_id": frame_id, "source_frame_id": source_frame_id,
                                          "resolution": resolution, "evidence": captured})
@@ -856,7 +891,7 @@ class RunStore:
                 if frame["status"] == "superseded":
                     continue
                 evidence = frame_evidence(frame) + [e for a in state["assessments"] if a["frame_id"] == frame["frame_id"] for e in a["evidence"]]
-                if not all(evidence_is_current(e) for e in evidence):
+                if not all(evidence_is_current(e) for e in evidence) or not frame_is_current(state, frame):
                     frame["status"] = "stale"
                     affected.add(root_step_id(state, frame["frame_id"]))
                     if frame.get("step_id"):
@@ -926,7 +961,7 @@ class RunStore:
             relevant = [f for f in state["frames"] if f["status"] != "superseded"]
             if any(not frame_resolved(f) for f in relevant):
                 raise ValueError("Unresolved skill work or findings remain")
-            if any(not evidence_is_current(e) for f in relevant for e in frame_evidence(f)):
+            if any(not frame_is_current(state, f) for f in relevant):
                 raise ValueError("Revalidate changed artifacts before completion")
             current_ids = {f["frame_id"] for f in relevant}
             if any(not evidence_is_current(e) for a in state["assessments"] if a["frame_id"] in current_ids for e in a["evidence"]):

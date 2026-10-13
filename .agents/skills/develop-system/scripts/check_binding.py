@@ -18,10 +18,17 @@ def git_identity(root):
                 text=True,encoding='utf-8').strip()
         except subprocess.CalledProcessError as exc:
             raise ValueError('Actual Git worktree required') from exc
-    top=Path(git('rev-parse','--show-toplevel')).resolve()
+    # One Git observation avoids repeated process launches for every consumer.
+    top_name,common_name,directory_name=git('rev-parse','--path-format=absolute',
+        '--show-toplevel','--git-common-dir','--absolute-git-dir').splitlines()
+    top=Path(top_name).resolve()
     if top != root:raise ValueError('Exact Git worktree root required')
-    return {'root':str(root),'common_dir':str(Path(git('rev-parse','--path-format=absolute','--git-common-dir')).resolve()),
-            'git_dir':str(Path(git('rev-parse','--absolute-git-dir')).resolve())}
+    paths={'root':root,'common_dir':Path(common_name).resolve(),'git_dir':Path(directory_name).resolve()}
+    def identity(path):
+        stat=path.stat()
+        return {'device':stat.st_dev,'inode':stat.st_ino}
+    return {**{name:str(path) for name,path in paths.items()},
+            'object_ids':{name:identity(path) for name,path in paths.items()}}
 
 
 def relative(root,value):
@@ -55,9 +62,14 @@ def bind_worktree(project,run_id,frame_id,input_version,declaration):
             'execution_roots':execution,'source_ranges':source}
 
 
-def validate_binding(binding,cwd):
+def validate_worktree(binding):
+    if not binding:raise ValueError('Explicit current worktree binding required')
     if git_identity(binding['project']['root']) != binding['project'] or git_identity(binding['worktree']['root']) != binding['worktree']:
         raise ValueError('Repository or worktree identity changed')
+
+
+def validate_binding(binding,cwd):
+    validate_worktree(binding)
     path=Path(cwd).resolve()
     if not any(path.is_relative_to(Path(p)) for p in binding['execution_roots']):
         raise ValueError('Check cwd outside explicit execution scope')
@@ -84,6 +96,16 @@ def authorized_source(root,source_ranges,path):
                for p in parts) or name.suffix.lower() in {'.pem','.key','.pfx'}:
             raise ValueError('Sensitive or repository metadata excluded from candidate ranges')
     return target
+
+
+def validate_reference_candidate(record,binding):
+    """A reviewer authorizes the candidate; it does not inherit an execution."""
+    validate_worktree(binding)
+    if any(binding[name] != record['binding'][name] for name in ('project','worktree')):
+        raise ValueError('Reference belongs to another authorized candidate worktree')
+    root=Path(binding['worktree']['root'])
+    for file in record['candidate']['files']:
+        authorized_source(root,binding['source_ranges'],root/file['path'])
 
 
 def candidate_snapshot(binding,selection):
