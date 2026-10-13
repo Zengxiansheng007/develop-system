@@ -16,6 +16,7 @@ from codex_runtime import accept_result, resolve_skill
 from validate_registry import validate
 from grill_routing import decide_entry, decide_root_route
 from record_check import validate_record
+from check_binding import bind_worktree, validate_managed
 
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 
@@ -501,11 +502,11 @@ class RunStore:
             return state
         return self.mutate(revision, change)
 
-    def dispatch(self, revision, skill_id, input_version, step_id=None, parent_frame_id=None, inputs=(), skill_path=None, require_original=False, required=True):
+    def dispatch(self, revision, skill_id, input_version, step_id=None, parent_frame_id=None, inputs=(), skill_path=None, require_original=False, required=True, worktree=None):
         return self.mutate(revision, lambda state: self._dispatch_state(state, skill_id, input_version,
-            step_id, parent_frame_id, inputs, skill_path, require_original, required))
+            step_id, parent_frame_id, inputs, skill_path, require_original, required, worktree))
 
-    def _dispatch_state(self, state, skill_id, input_version, step_id=None, parent_frame_id=None, inputs=(), skill_path=None, require_original=False, required=True):
+    def _dispatch_state(self, state, skill_id, input_version, step_id=None, parent_frame_id=None, inputs=(), skill_path=None, require_original=False, required=True, worktree=None):
         require_current(state)
         if state["status"] != "running" or not input_version or (step_id is None) == (parent_frame_id is None):
             raise ValueError("Running execution and exactly one step or parent are required")
@@ -548,7 +549,10 @@ class RunStore:
                                 "skill_id": skill_id, "skill_path": selected["skill_path"], "skill_sha256": selected["sha256"], "mode": mode,
                                 "done_when": descriptor["done_when"], "status": "running", "required": step["required"] if step_id is not None else required, "input_version": input_version,
                                 "inputs": captured, "artifacts": [], "needs_assessment": False})
-        state["next_decision"] = {"action": "execute_frame", "frame_id": state["frames"][-1]["frame_id"], "return_to": "develop-system"}
+        frame = state["frames"][-1]
+        frame["worktree_binding"] = (bind_worktree(self.project, state["run_id"], frame["frame_id"],
+            input_version, worktree) if worktree is not None else None)
+        state["next_decision"] = {"action": "execute_frame", "frame_id": frame["frame_id"], "return_to": "develop-system"}
         return state
 
     def receive(self, revision, result):
@@ -580,8 +584,7 @@ class RunStore:
                 check["record"] = file_evidence(check["record"])
                 recorded = json.loads(Path(check["record"]["path"]).read_text(encoding="utf-8"))
                 actual = validate_record(recorded)
-                if not Path(recorded["cwd"]).resolve().is_relative_to(self.project):
-                    raise ValueError("Check record belongs to another project")
+                validate_managed(recorded, selected_frame.get("worktree_binding"))
                 if check.get("status") != actual:
                     raise ValueError("Claimed check status contradicts recorded execution")
                 if "command" in check and check["command"] != recorded["command"]:
@@ -971,6 +974,7 @@ def main():
     parser.add_argument("--skill-path")
     parser.add_argument("--require-original", action="store_true")
     parser.add_argument("--optional", action="store_true")
+    parser.add_argument("--worktree", help="Explicit authorized worktree scope JSON for this dispatch")
     parser.add_argument("--reason")
     parser.add_argument("--user-reference")
     parser.add_argument("--input", action="append", default=[])
@@ -995,7 +999,8 @@ def main():
             if args.revision is None:
                 raise ValueError("Mutation requires the revision returned by show")
             if args.command == "dispatch":
-                value = store.dispatch(args.revision,args.skill_id,args.input_version,args.step_id,args.parent_frame_id,args.input,args.skill_path,args.require_original,not args.optional)
+                value = store.dispatch(args.revision,args.skill_id,args.input_version,args.step_id,args.parent_frame_id,args.input,args.skill_path,args.require_original,not args.optional,
+                    worktree=read(args.worktree) if args.worktree else None)
             elif args.command == 'attach-grill':value = store.attach_grill(args.revision,read(args.payload),args.input,args.skill_path)
             elif args.command == 'route-grill':value = store.route_grill(args.revision,args.event_id)
             elif args.command == "block":value = store.block_unavailable(args.revision,args.skill_id,args.reason,args.step_id,args.parent_frame_id)

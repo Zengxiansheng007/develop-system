@@ -24,6 +24,10 @@ For changes, start with the affected tests and direct dependants. The release bo
 
 ## Maintenance
 
+Command receipts from tools/checks.py are independent check-record v2 and require no run. Managed checks separately use dispatched worktree bindings and actual execution-time source observation; see [check records](../.agents/skills/develop-system/references/check-records.md). Repository success is not automatically managed-frame proof. Existing v1 receipts remain historical originals.
+
+The verification entry accepts `--timeout <seconds>` per command (default 300). Use a bounded larger value when observed real Git worktree checks exceed that duration; preserve the original timeout receipt.
+
 Update source and related tests/documentation together. Add or remove shipped skills through `release-manifest.json`, with license and dependency review. Keep source provenance immutable as a historical baseline; version control records later edits. A schema change needs an explicit compatibility and migration contract.
 
 Use GitHub Issues in this repository for new develop-system work. The previous local optimization map retains its authority until an explicit map publication records old-to-new links; repository setup does not duplicate its tickets.
