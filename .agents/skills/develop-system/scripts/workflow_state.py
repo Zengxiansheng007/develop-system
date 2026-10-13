@@ -300,7 +300,9 @@ def reconcile_system_conclusions(state):
         if not event.get("system_conclusions"):
             continue
         source = next(f for f in state["frames"] if f["frame_id"] == event["frame_id"])
-        current = source["status"] == "completed" and all(evidence_is_current(e) for e in frame_evidence(source))
+        latest = next(e for e in reversed(state["events"]) if e["frame_id"] == source["frame_id"])
+        current = (source["status"] == "completed" and latest["event_id"] == event["event_id"]
+                   and all(evidence_is_current(e) for e in frame_evidence(source)))
         for conclusion in event["system_conclusions"]:
             identity = conclusion["restriction_id"]
             if conclusion["action"] == "set":
@@ -558,6 +560,8 @@ class RunStore:
             selected_frame = next((f for f in state["frames"] if f["frame_id"] == item.get("frame_id")), None)
             if selected_frame is None or item["mode"] != selected_frame["mode"]:
                 raise ValueError("Return mode does not match dispatched frame")
+            if selected_frame.get("completion_invalidated_by") and selected_frame.get("needs_assessment"):
+                raise ValueError("Prior parent findings require professional assessment before requalification")
             if item.get("block_scope", "local") not in {"local", "unknown"}:
                 raise ValueError("Block scope must be local or explicitly unknown")
             if item["status"] == "completed" and any(
@@ -638,6 +642,8 @@ class RunStore:
             frame["acceptance_checks"] = acceptance
             frame["resolved_findings"] = resolutions
             frame["block_scope"] = item.get("block_scope", "local")
+            if item["status"] == "completed":
+                frame.pop("completion_invalidated_by", None)
             if item["status"] == "skipped":
                 frame["skip_reason"] = item["skip_reason"]
             if frame.get("step_id"):
@@ -855,12 +861,16 @@ class RunStore:
                     parent = frame.get("parent_frame_id")
                     while parent:
                         ancestor = next(f for f in state["frames"] if f["frame_id"] == parent)
-                        # An active parent still owns valid independent child work.
-                        # Its stale required child prevents premature completion.
-                        if ancestor["status"] == "completed":
-                            ancestor["status"] = "stale"
+                        # Child changes invalidate a parent's completion, not all
+                        # independent child inputs. Keep its identity for requalification.
+                        if ancestor["status"] == "completed" or (
+                                ancestor["status"] == "running" and ancestor.get("completion_invalidated_by")):
+                            ancestor["status"] = "running"
+                            causes = ancestor.setdefault("completion_invalidated_by", [])
+                            if frame["frame_id"] not in causes:
+                                causes.append(frame["frame_id"])
                             if ancestor.get("step_id"):
-                                stale.add(ancestor["step_id"])
+                                next(s for s in state["plan"] if s["step_id"] == ancestor["step_id"])["status"] = "running"
                         parent = ancestor.get("parent_frame_id")
             changed = True
             capabilities = {s["id"]: s for s in state["registry"]["skills"] + state["temporary_skills"]}
@@ -888,10 +898,10 @@ class RunStore:
                     target = next(f for f in state["frames"] if f["frame_id"] == assessment["frame_id"])
                     if target["status"] != "superseded":
                         target["needs_assessment"] = True
-            if stale:
+            if affected:
                 for criterion in state["acceptance"]:
                     source = next((f for f in state["frames"] if f["frame_id"] == criterion.get("source_frame_id")), None)
-                    if source and source["status"] in {"stale", "superseded", "interrupted"}:
+                    if source and (source["status"] in {"stale", "superseded", "interrupted"} or source.get("completion_invalidated_by")):
                         criterion.update(status="pending", evidence=[])
             state["status"] = "running"
             state["control"] = {"status": "running", "user_reason": None}

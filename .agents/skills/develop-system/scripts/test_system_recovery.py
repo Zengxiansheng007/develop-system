@@ -188,6 +188,80 @@ class SystemRecoveryTests(unittest.TestCase):
         self.assertEqual(state['frames'][1]['status'],'superseded')
         self.assertEqual(state['frames'][2]['status'],'completed')
 
+    def test_completed_parent_requalifies_without_rerunning_independent_completed_sibling(self):
+        source=self.root/'completed-child-input.txt'
+        source.write_text('original input',encoding='utf-8')
+        state=self.dispatch(self.create([{'step_id':'a','skill_id':'implement'}]))
+        parent=state['frames'][-1]
+        state=self.dispatch(state,'tdd',parent=parent['frame_id'],inputs=[str(source)])
+        changed=state['frames'][-1]
+        state=self.store.receive(state['revision'],self.event(changed))
+        state=self.dispatch(state,'domain-modeling',parent=parent['frame_id'])
+        sibling=state['frames'][-1]
+        sibling_event=self.event(sibling)
+        state=self.store.receive(state['revision'],sibling_event)
+        sibling_saved=state['frames'][-1]
+        state=self.store.receive(state['revision'],self.event(parent))
+        history=state['events']
+        source.write_text('changed child input',encoding='utf-8')
+        state=self.store.resume(state['revision'])
+        self.assertEqual(state['frames'][2],sibling_saved)
+        self.assertEqual(state['events'],history)
+        self.assertNotEqual(state['frames'][0]['status'],'completed')
+        with self.assertRaises(ValueError):self.store.receive(state['revision'],self.event(parent))
+        with self.assertRaises(ValueError):self.store.complete(state['revision'],[])
+        # Revalidate only the affected child, then obtain a fresh parent conclusion.
+        state=self.dispatch(state,'tdd',parent=parent['frame_id'],inputs=[str(source)])
+        state=self.store.receive(state['revision'],self.event(state['frames'][-1]))
+        criterion=state['acceptance'][0]['id']
+        state=self.store.receive(state['revision'],self.event(parent,acceptance_checks=[{
+            'id':criterion,'status':'passed','kind':'technical','completion_checked':True,
+            'evidence':[str(self.output)]}]))
+        state=self.store.complete(state['revision'],[{'id':criterion,'source_frame_id':parent['frame_id']}])
+        self.assertEqual(state['status'],'completed')
+        self.assertEqual(len(state['frames']),4)
+        self.assertEqual(state['frames'][2],sibling_saved)
+        self.assertEqual(sum(e['frame_id']==sibling['frame_id'] for e in state['events']),1)
+
+    def test_parent_requalification_does_not_erase_prior_findings(self):
+        source=self.root/'finding-child.txt'
+        source.write_text('original',encoding='utf-8')
+        state=self.dispatch(self.create())
+        parent=state['frames'][-1]
+        state=self.dispatch(state,'tdd',parent=parent['frame_id'],inputs=[str(source)])
+        state=self.store.receive(state['revision'],self.event(state['frames'][-1]))
+        state=self.store.receive(state['revision'],self.event(parent,findings=['unresolved professional finding']))
+        source.write_text('changed',encoding='utf-8')
+        state=self.store.resume(state['revision'])
+        before=self.store.path.read_bytes()
+        with self.assertRaises(ValueError):self.store.receive(state['revision'],self.event(parent))
+        self.assertEqual(self.store.path.read_bytes(),before)
+        self.assertTrue(state['frames'][0]['needs_assessment'])
+
+    def test_requalified_parent_needs_fresh_system_clear_not_its_old_event(self):
+        plan=[{'step_id':'a','skill_id':'implement'},
+              {'step_id':'repair','skill_id':'code-review','recovery_for':['database'],
+               'authorization_reference':'synthetic recovery authorization','shared_preconditions':[]}]
+        source=self.root/'recovery-child.txt'
+        source.write_text('original',encoding='utf-8')
+        state=self.dispatch(self.create(plan))
+        blocked=self.event(state['frames'][-1],system_conclusions=[self.conclusion('database')])
+        state=self.store.receive(state['revision'],blocked)
+        state=self.dispatch(state,'code-review','repair')
+        parent=state['frames'][-1]
+        state=self.dispatch(state,'tdd',parent=parent['frame_id'],inputs=[str(source)])
+        state=self.store.receive(state['revision'],self.event(state['frames'][-1]))
+        state=self.store.receive(state['revision'],self.event(parent,
+            system_conclusions=[self.conclusion('database','clear',blocked['event_id'])]))
+        source.write_text('changed',encoding='utf-8')
+        state=self.store.resume(state['revision'])
+        self.assertEqual([r['restriction_id'] for r in state['restrictions']],['database'])
+        state=self.dispatch(state,'tdd',parent=parent['frame_id'],inputs=[str(source)])
+        state=self.store.receive(state['revision'],self.event(state['frames'][-1]))
+        state=self.store.receive(state['revision'],self.event(parent))
+        state=self.store.resume(state['revision'])
+        self.assertEqual([r['restriction_id'] for r in state['restrictions']],['database'])
+
     def test_expired_recovery_evidence_restores_only_its_system_restriction(self):
         plan=[{'step_id':'a','skill_id':'implement'},
               {'step_id':'repair','skill_id':'code-review','recovery_for':['database'],
