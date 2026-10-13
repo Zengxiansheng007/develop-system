@@ -41,8 +41,8 @@ def run_record(command, cwd, output, timeout=300, *, binding=None, candidate=Non
                     folder=Path(directory)
                     request=folder/'request.json'
                     observed=folder/'observed.json'
-                    request.write_text(json.dumps({'command':command,'entry':str(Path(binding['worktree']['root'])/candidate['entry']),'source_roots':[
-                        str(Path(binding['worktree']['root'])/p) for p in binding['source_ranges']]}),encoding='utf-8')
+                    request.write_text(json.dumps({'command':command,'entry':str(Path(binding['worktree']['root'])/candidate['entry']),
+                        'worktree_root':binding['worktree']['root'],'source_ranges':binding['source_ranges']}),encoding='utf-8')
                     execution=[command[0],*flags,'-B',str(Path(__file__).with_name('observe_python.py')),str(request),str(observed)]
                 elif candidate is not None:
                     raise ValueError('Candidate requires a dispatched managed binding')

@@ -78,6 +78,75 @@ class WorktreeCheckTests(unittest.TestCase):
             'artifacts':[],'checks':[{'record':str(record),'status':'passed'}],'findings':[],'blockers':[],
             'acceptance_checks':[],'resolved_findings':[]}
 
+    def directory_link(self,link,target):
+        # Real synthetic directory junctions need no Windows privilege changes.
+        if os.name=='nt':
+            quote=lambda p: "'"+str(p).replace("'","''")+"'"
+            subprocess.run(['powershell','-NoProfile','-NonInteractive','-Command',
+                'New-Item -ItemType Junction -Path '+quote(link)+' -Target '+quote(target)+' -ErrorAction Stop | Out-Null'],
+                check=True,capture_output=True,text=True,encoding='utf-8')
+        else:
+            link.symlink_to(target,target_is_directory=True)
+        self.addCleanup(lambda: link.rmdir() if os.name=='nt' else link.unlink())
+
+    def test_linked_descendant_cannot_collect_unauthorized_source(self):
+        frame=self.dispatch()
+        target=self.worktree/'private';target.mkdir()
+        (target/'note.py').write_text('SYNTHETIC=True\n',encoding='utf-8')
+        self.directory_link(self.worktree/'src/linked',target)
+        before=self.store.path.read_bytes()
+        path,record=self.check(frame)
+        self.assertEqual(record['status'],'failed')
+        self.assertIn('source scope',record['error'])
+        self.assertIsNone(record['execution_command'])
+        self.assertNotIn('candidate',record)
+        with self.assertRaises(ValueError):self.store.receive(self.state['revision'],self.event(frame,path))
+        self.assertEqual(self.store.path.read_bytes(),before)
+
+    def test_observer_excludes_sensitive_targets_before_collecting_hashes(self):
+        target=self.worktree/'src/credentials';target.mkdir()
+        note=target/'note.py';note.write_text('SYNTHETIC=True\n',encoding='utf-8')
+        script=self.worktree/'tests/check.py'
+        script.write_text(script.read_text(encoding='utf-8')+
+            "import runpy\nrunpy.run_path(str(Path(__file__).parents[1]/'src/credentials/note.py'))\n",encoding='utf-8')
+        selection=self.candidate();selection['ranges'][0]['path']='src/value.py'
+        frame=self.dispatch()
+        record=run_record([sys.executable,'-B',str(script),str(self.worktree/'src')],self.worktree,
+            self.root/'observed-sensitive.json',binding=frame['worktree_binding'],candidate=selection)
+        self.assertEqual(record['status'],'failed')
+        self.assertNotIn(str(note),[p['path'] for p in record['observation']['loaded']])
+        self.assertIn('Sensitive',record['stderr'])
+
+    def test_resolved_link_targets_keep_sensitive_and_metadata_exclusions(self):
+        frame=self.dispatch()
+        for index,name in enumerate(('ordinary','.git','credentials','.env.fixture')):
+            with self.subTest(target=name):
+                target=self.worktree/'src'/name;target.mkdir()
+                (target/'note.py').write_text('SYNTHETIC=True\n',encoding='utf-8')
+                link=self.worktree/'src'/('linked-'+str(index))
+                self.directory_link(link,target)
+                selection=self.candidate();selection['ranges'][0]['path']='src/value.py'
+                selection['ranges'].append({'path':link.relative_to(self.worktree).as_posix(),'role':'source'})
+                record=run_record([sys.executable,'-B',str(self.worktree/'tests/check.py'),str(self.worktree/'src')],
+                    self.worktree,self.root/('linked-'+str(index)+'.json'),binding=frame['worktree_binding'],candidate=selection)
+                if name=='ordinary':
+                    self.assertEqual(record['status'],'passed',record['error'])
+                else:
+                    self.assertEqual(record['status'],'failed')
+                    self.assertIn('Sensitive',record['error'])
+                    self.assertIsNone(record['execution_command'])
+                    self.assertNotIn('candidate',record)
+
+    def test_replacing_authorized_directory_cannot_move_its_scope(self):
+        frame=self.dispatch()
+        target=self.worktree/'private'
+        (self.worktree/'src').rename(target)
+        self.directory_link(self.worktree/'src',target)
+        _,record=self.check(frame)
+        self.assertEqual(record['status'],'failed')
+        self.assertIn('source scope',record['error'])
+        self.assertIsNone(record['execution_command'])
+
     def test_authorized_external_worktree_executes_dirty_candidate_and_returns(self):
         frame=self.dispatch()
         path,record=self.check(frame)

@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import runpy
 import sys
+from check_binding import authorized_source
 
 
 def python_invocation(command):
@@ -29,7 +30,8 @@ def main():
     # observed file hash describes the source actually compiled for this check.
     sys.pycache_prefix=str(Path(request_path).parent/'fresh-bytecode')
     _,target=python_invocation(request['command'])
-    roots=[Path(p).resolve() for p in request['source_roots']]
+    root=Path(request['worktree_root'])
+    roots=[root/p for p in request['source_ranges']]
     loaded={}
     entry=None
     def observe(event,args):
@@ -37,10 +39,12 @@ def main():
         if event!='exec':return
         name=args[0].co_filename
         if name.startswith('<'):return
-        path=Path(name).resolve()
+        original=Path(name).absolute()
+        path=original.resolve()
         if not path.is_file():return
         if str(path)==request['entry']:entry=str(path)
-        if any(path.is_relative_to(root) for root in roots):
+        if any(path.is_relative_to(scope) or original.is_relative_to(scope) for scope in roots):
+            path=authorized_source(root,request['source_ranges'],original)
             loaded[str(path)]=hashlib.sha256(path.read_bytes()).hexdigest()
     try:
         if target[0]=='-m':

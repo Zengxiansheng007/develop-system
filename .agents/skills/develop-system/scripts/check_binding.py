@@ -70,6 +70,22 @@ def validate_binding(binding,cwd):
         raise ValueError('Check cwd is an unassigned worktree outside execution scope')
 
 
+def authorized_source(root,source_ranges,path):
+    """Authorize the actual target before any candidate/observer byte collection."""
+    target=path.resolve(strict=True)
+    # Ranges were canonicalized at dispatch. Do not resolve them again: replacing
+    # a permitted directory with a link must not move the original authorization.
+    if not any(target.is_relative_to(root/p) for p in source_ranges):
+        raise ValueError('Candidate outside authorized source scope')
+    for name in (path,target):
+        if not name.is_relative_to(root):raise ValueError('Candidate escapes worktree')
+        parts=[p.lower() for p in name.relative_to(root).parts]
+        if any(p in {'.git','.env','credentials','secrets.json','credentials.json'} or p.startswith('.env.')
+               for p in parts) or name.suffix.lower() in {'.pem','.key','.pfx'}:
+            raise ValueError('Sensitive or repository metadata excluded from candidate ranges')
+    return target
+
+
 def candidate_snapshot(binding,selection):
     root=Path(binding['worktree']['root'])
     if not isinstance(selection,dict):raise ValueError('Professional candidate selection required')
@@ -79,17 +95,13 @@ def candidate_snapshot(binding,selection):
     for item in ranges:
         if item.get('role') not in {'source','test','config','dependency'}:raise ValueError('Candidate role required')
         start=relative(root,item['path'])
-        if not any(start.is_relative_to(relative(root,p)) for p in binding['source_ranges']):
-            raise ValueError('Candidate outside authorized source scope')
+        authorized_source(root,binding['source_ranges'],root/item['path'])
         if not start.exists():raise ValueError('Related range missing')
         for path in ([start] if start.is_file() else sorted(start.rglob('*'))):
             if not path.is_file() or '__pycache__' in path.parts or path.suffix=='.pyc':continue
-            if not path.resolve().is_relative_to(root):raise ValueError('Candidate symlink escapes worktree')
-            if any(p=='.git' or p=='.env' or p.startswith('.env.') or p.lower() in {'credentials','secrets.json','credentials.json'}
-                   for p in path.relative_to(root).parts) or path.suffix.lower() in {'.pem','.key','.pfx'}:
-                raise ValueError('Sensitive or repository metadata excluded from candidate ranges')
+            target=authorized_source(root,binding['source_ranges'],path)
             name=path.relative_to(root).as_posix()
-            evidence={'path':name,'sha256':hashlib.sha256(path.read_bytes()).hexdigest(),'role':item['role']}
+            evidence={'path':name,'sha256':hashlib.sha256(target.read_bytes()).hexdigest(),'role':item['role']}
             if name in files and files[name]!=evidence:raise ValueError('Overlapping candidate roles')
             files[name]=evidence
     loaded=selection.get('loaded')
@@ -105,6 +117,8 @@ def validate_managed(record,binding):
     if record.get('schema_version') != 2 or record.get('context') != 'managed' or not binding or record.get('binding') != binding:
         raise ValueError('Current checks require their original managed v2 frame binding')
     validate_binding(binding,record['cwd'])
+    if not isinstance(record.get('candidate'),dict):
+        raise ValueError('Managed check did not collect an authorized candidate')
     current=candidate_snapshot(binding,record['candidate']['selection'])
     if current != record['candidate'] or record.get('candidate_after') != current:
         raise ValueError('Candidate changed or incomplete')
