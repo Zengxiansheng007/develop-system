@@ -115,7 +115,7 @@
       ]
     },
     {
-      "id": "research",
+      "id": "matt-research",
       "stage": "requirements-design",
       "role": "auxiliary",
       "enabled": true,
@@ -126,7 +126,8 @@
       "requires": [],
       "outputs": [
         "带引用的调研结论"
-      ]
+      ],
+      "path": "../research/SKILL.md"
     },
     {
       "id": "domain-modeling",
