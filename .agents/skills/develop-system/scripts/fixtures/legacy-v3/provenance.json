@@ -1,0 +1,37 @@
+{
+  "repository": "Zengxiansheng007/develop-system",
+  "commit": "e6b98caa8c183902a15f83f57fd174e0783660a5",
+  "purpose": "Isolated historical engine version refusal and original v3 construction; not an installable runtime",
+  "files": [
+    {
+      "path": "scripts/workflow_state.py",
+      "source_path": ".agents/skills/develop-system/scripts/workflow_state.py",
+      "sha256": "42c885073e4b3fc9059179f3bd2f283e205d314be71e14f770fdddcb88a9e097"
+    },
+    {
+      "path": "scripts/codex_runtime.py",
+      "source_path": ".agents/skills/develop-system/scripts/codex_runtime.py",
+      "sha256": "ee1d09bb3a56844ec0be6bf07cd576ef4c644037f38bd22c4cf22dc459328c5d"
+    },
+    {
+      "path": "scripts/validate_registry.py",
+      "source_path": ".agents/skills/develop-system/scripts/validate_registry.py",
+      "sha256": "f10b8f5642d11951764dc1b0df32c3169a123425f99d7847726573079e0a35e5"
+    },
+    {
+      "path": "scripts/grill_routing.py",
+      "source_path": ".agents/skills/develop-system/scripts/grill_routing.py",
+      "sha256": "97cb718b795adc82375ba8c3cc35d6deded4f4eba4a0e5438af9b34962eb5aaa"
+    },
+    {
+      "path": "scripts/record_check.py",
+      "source_path": ".agents/skills/develop-system/scripts/record_check.py",
+      "sha256": "e6b167dc463f2e483566fa19eb06cfc9e228bd917e4750f60023c8e8b9c1f00b"
+    },
+    {
+      "path": "registry.json",
+      "source_path": ".agents/skills/develop-system/registry.json",
+      "sha256": "f5d81607a128b2d6a2f70c1dd93f14d4cd735b3e2a8fb993992fcca91610ab7b"
+    }
+  ]
+}

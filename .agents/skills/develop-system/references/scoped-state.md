@@ -1,6 +1,6 @@
-# 局部作用范围、用户暂停与系统恢复：T01–T07 候选
+# 局部作用范围、用户暂停与系统恢复：T01–T08 候选
 
-本候选交付 Issue #2 的局部阻塞隔离、Issue #3 的用户暂停收件、Issue #4 的专业系统恢复、Issue #5 的授权工作树检查记录 v2、Issue #6 的候选证据失效与保留原来源的评审引用、Issue #7 的 registry v3 必需助手与父帧义务，以及 Issue #8 的局部漏登记修正。创建 state v4 和 protocol_version: 1 的帧/结果；v3 保持只读，旧引擎不能读写 v4。检查绑定、真实来源采集及当前证据资格见[机器检查记录](check-records.md)；助手资格与显式修正见[扩展接口](extensions.md)。registry v2 快照不可自动续写。#11 的旧证据复用与迁移及 #12 的整批集成仍未交付，本候选不是首批全功能运行版本。
+本候选交付 Issue #2 的局部阻塞隔离、Issue #3 的用户暂停收件、Issue #4 的专业系统恢复、Issue #5 的授权工作树检查记录 v2、Issue #6 的候选证据失效与保留原来源的评审引用、Issue #7 的 registry v3 必需助手与父帧义务、Issue #8 的局部漏登记修正，以及 Issue #9 的[只读迁移预览](migration-preview.md)。创建 state v4 和 protocol_version: 1 的帧/结果；v3 保持只读，旧引擎的公开状态操作拒绝 v4。检查资格见[机器检查记录](check-records.md)，助手资格与明确修正见[扩展接口](extensions.md)。registry v2 快照不可自动续写；#10/#11 的实际采用、回滚及历史兼容，以及 #12 整批集成仍未交付。
 
 ## 从事实到就绪
 

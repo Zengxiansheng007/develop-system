@@ -511,6 +511,18 @@ class RunStore:
             if temp.is_file():
                 temp.unlink()
 
+    def preview_migration(self, target_registry=SKILL_ROOT / "registry.json"):
+        """Describe a v3 source against this candidate without mutating either."""
+        from migration_preview import build_preview
+        before = self.path.read_bytes()
+        state = self.read()
+        if json.loads(before) != state:
+            raise ValueError("Source changed while reading migration preview")
+        result = build_preview(state, before, self.path, SKILL_ROOT, target_registry)
+        if self.path.read_bytes() != before:
+            raise ValueError("Source changed while preparing migration preview")
+        return result
+
     def create(self, goal, plan, acceptance, registry_path=SKILL_ROOT / "registry.json"):
         registry, registry_path, digest = load_registry(registry_path)
         validate_plan(plan, registry)
@@ -1150,7 +1162,7 @@ class RunStore:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["init", "show", "next", "inspect-grill", "attach-grill", "route-grill", "dispatch", "block", "return", "register", "extend-plan", "assess", "resume", "complete", "pause", "cancel"])
+    parser.add_argument("command", choices=["init", "show", "next", "preview-migration", "inspect-grill", "attach-grill", "route-grill", "dispatch", "block", "return", "register", "extend-plan", "assess", "resume", "complete", "pause", "cancel"])
     parser.add_argument("--entry", required=True, choices=["develop-system", "ask-matt"])
     parser.add_argument("--project-root", required=True)
     parser.add_argument("--run-id", required=True)
@@ -1189,6 +1201,8 @@ def main():
             value = store.inspect_grill_entry(context)
         elif args.command == "init":
             value = store.create(args.goal, read(args.plan), read(args.acceptance), args.registry)
+        elif args.command == "preview-migration":
+            value = store.preview_migration(args.registry)
         elif args.command in {"show", "next"}:
             state = store.read();value = state if args.command == "show" else {"ready_steps": ready_steps(state), "next_decision": state["next_decision"]}
         else:
