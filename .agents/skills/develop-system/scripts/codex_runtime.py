@@ -44,9 +44,11 @@ RETURN_STATUSES = {"completed", "failed", "blocked", "waiting_user", "skipped", 
 
 def accept_result(state, result):
     """Merge a specialist's declared result, checking protocol rather than business behavior."""
+    if state.get("schema_version") != 4:
+        raise ValueError("Legacy state requires explicit migration before accepting results")
     if state.get("mode", "execute") != "execute" or result.get("skill_id") in {"ask-matt", "develop-system"}:
         raise ValueError("Navigation cannot write execution state")
-    if state.get("status") != "running":
+    if state.get("status") != "running" or state.get("control", {}).get("status") != "running":
         raise ValueError("Run must be explicitly resumed before accepting results")
     required = {"event_id", "run_id", "frame_id", "parent_frame_id", "skill_id", "status", "return_to", "completion_checked", "artifacts", "checks", "findings", "blockers"}
     if not required <= result.keys():
@@ -70,6 +72,8 @@ def accept_result(state, result):
     frame = frames.get(result["frame_id"])
     if frame is None or frame["skill_id"] != result["skill_id"] or frame.get("parent_frame_id") != result["parent_frame_id"]:
         raise ValueError("Unknown or mismatched frame")
+    if frame.get("protocol_version") != 1 or type(result.get("protocol_version")) is not int or result["protocol_version"] != frame["protocol_version"]:
+        raise ValueError("Return protocol version does not match the dispatched frame")
     if "input_version" in frame and result.get("input_version") != frame["input_version"]:
         raise ValueError("Result belongs to an obsolete input version")
     if frame["status"] not in {"running", "waiting_user", "blocked"}:

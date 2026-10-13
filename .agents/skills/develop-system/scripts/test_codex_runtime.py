@@ -6,16 +6,16 @@ from codex_runtime import accept_result, delegation_mode, resolve_skill
 
 
 def frame(name, skill, parent=None):
-    return {"frame_id": name, "skill_id": skill, "parent_frame_id": parent, "status": "running"}
+    return {"protocol_version": 1, "frame_id": name, "skill_id": skill, "parent_frame_id": parent, "status": "running"}
 
 
 def event(item, status="completed"):
-    return {"event_id": item["frame_id"] + "-return", "run_id": "test", "frame_id": item["frame_id"], "parent_frame_id": item["parent_frame_id"], "skill_id": item["skill_id"], "status": status, "return_to": "develop-system", "completion_checked": True, "artifacts": [], "checks": [], "findings": [], "blockers": []}
+    return {"protocol_version": 1, "event_id": item["frame_id"] + "-return", "run_id": "test", "frame_id": item["frame_id"], "parent_frame_id": item["parent_frame_id"], "skill_id": item["skill_id"], "status": status, "return_to": "develop-system", "completion_checked": True, "artifacts": [], "checks": [], "findings": [], "blockers": []}
 
 
 class RuntimeTests(unittest.TestCase):
     def state(self, *items):
-        return {"run_id": "test", "status": "running", "revision": 0, "frames": list(items), "events": []}
+        return {"schema_version": 4, "run_id": "test", "status": "running", "control": {"status": "running"}, "revision": 0, "frames": list(items), "events": []}
 
     def test_nested_return_resumes_parent_without_completing_it(self):
         parent, child = frame("design", "grill-with-docs"), frame("terms", "domain-modeling", "design")

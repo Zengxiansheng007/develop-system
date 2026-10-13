@@ -1,4 +1,4 @@
-# Codex统一执行协议 v3
+# Codex统一执行协议：state v4 / 回流代次 1（首批 T01 候选）
 
 本协议的帧/状态/强制回流仅在显式 develop-system 流程内启用。流程外技能返回调用方。ask-matt 纯导航，不建帧、不分派、不写状态。
 
@@ -11,7 +11,7 @@
 
 ## 状态与委派
 
-状态保存在目标项目 .develop-system/runs/<run-id>/state.json，不同目标分别记录。schema v3、controller_policy: dispatch-only。只有总路由角色写状态，工作代理返回独立结果；排他锁、revision 与原子替换避免覆盖。
+状态保存在目标项目 .develop-system/runs/<run-id>/state.json，不同目标分别记录。state v4、controller_policy: dispatch-only。只有总路由角色写状态，工作代理返回独立结果；排他锁、revision 与原子替换避免覆盖。当前候选能力和局部限制见[作用范围](scoped-state.md)。
 
 - 真实委派须有用户或适用技能的明确指令、工具、槽位与独立任务；仅编辑这些文件不启动代理。并行修改需不相交文件或已授权隔离工作区。
 - 有 collaboration 工具时直接调用 spawn_agent/send_message/wait_agent，不能放进 functions.exec。总路由统一分派；专业协调技能提供工作请求，工作代理不递归扩大团队。
@@ -24,6 +24,7 @@
 
 ```json
 {
+  "protocol_version": 1,
   "event_id": "unique-result-id",
   "run_id": "current-run",
   "frame_id": "current-frame",
@@ -65,7 +66,7 @@ resolved_findings 为专业技能确认已处理的旧 frame_id 数组；结论�
 
 Windows 使用 PowerShell 原生命令，人工向导匹配实际 Bash/WSL/PowerShell 环境。打开文件不表示执行或验证完成。
 
-状态工具与迁移详见 [状态操作](state-operations.md)，扩展见 [扩展接口](extensions.md)。旧 schema v1/v2 拒绝自动续跑：对应专业技能先核验旧证据，在 v3 新 run 中返回来源明确的新结论。
+状态工具与迁移边界见[状态操作](state-operations.md)，扩展见[扩展接口](extensions.md)。v3 仅只读；旧帧兼容与迁移入口尚待后续票交付。v1/v2 不自动续跑，原身份、历史和授权保留。
 
 ## 命令检查证据
 

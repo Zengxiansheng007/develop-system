@@ -71,6 +71,9 @@ def validate_plan(plan, registry):
             raise ValueError("depends_on must be an array")
         if not isinstance(step.get("required", True), bool):
             raise ValueError("required must be boolean")
+        prerequisites = step.get("shared_preconditions", [])
+        if not isinstance(prerequisites, list) or any(not isinstance(p, str) or not p.strip() for p in prerequisites):
+            raise ValueError("shared_preconditions must contain named known premises")
         steps[step["step_id"]] = step
     visited, active = set(), set()
     def visit(name):
@@ -123,20 +126,117 @@ def supersede_tree(frames, roots):
             frame["status"] = "superseded"
 
 
+def root_step_id(state, frame_id):
+    frames = {f["frame_id"]: f for f in state["frames"]}
+    while frame_id is not None:
+        frame = frames[frame_id]
+        if frame.get("step_id"):
+            return frame["step_id"]
+        frame_id = frame.get("parent_frame_id")
+    return None
+
+
+def step_restricted(state, step):
+    related = {step["step_id"]}
+    while True:
+        expanded = related | {d for s in state["plan"] if s["step_id"] in related for d in s.get("depends_on", [])}
+        if expanded == related:
+            break
+        related = expanded
+    for restriction in scoped_restrictions(state):
+        if restriction.get("frame_id") in step.get("resolves_frames", []) and restriction["kind"] == "findings":
+            continue
+        if (restriction.get("scope") == "unknown" or restriction.get("step_id") in related
+                or set(restriction.get("shared_preconditions", [])) & set(step.get("shared_preconditions", []))):
+            return True
+    return False
+
+
+def scoped_restrictions(state):
+    """Derive active local facts; durable capability/retry stops survive frame replacement."""
+    for restriction in state["restrictions"]:
+        step = next((s for s in state["plan"] if s["step_id"] == restriction.get("step_id")), {})
+        yield {"shared_preconditions": step.get("shared_preconditions", []), **restriction}
+    for frame in state["frames"]:
+        if frame["status"] == "superseded":
+            continue
+        if frame["status"] in {"blocked", "waiting_user", "cancelled"} or frame.get("needs_assessment"):
+            yield {"kind": "findings" if frame["status"] == "completed" else frame["status"],
+                   "frame_id": frame["frame_id"], "step_id": root_step_id(state, frame["frame_id"]),
+                   "scope": frame.get("block_scope", "local"),
+                   "shared_preconditions": frame.get("shared_preconditions", [])}
+
+
+def child_restricted(state, parent, skill_id):
+    ancestors = {parent["frame_id"]}
+    ancestor = parent.get("parent_frame_id")
+    while ancestor is not None:
+        ancestors.add(ancestor)
+        ancestor = next(f for f in state["frames"] if f["frame_id"] == ancestor).get("parent_frame_id")
+    for restriction in scoped_restrictions(state):
+        if (restriction.get("scope") == "unknown" or restriction.get("frame_id") in ancestors
+                or set(restriction.get("shared_preconditions", [])) & set(parent.get("shared_preconditions", []))):
+            return True
+        if restriction["kind"] == "no_progress":
+            source = next(f for f in state["frames"] if f["frame_id"] == restriction["frame_id"])
+            if source.get("parent_frame_id") == parent["frame_id"] and source["skill_id"] == skill_id:
+                return True
+    return False
+
+
+
+def active_root_work(state):
+    """Waiting parents are not workers; an active independent child still consumes capacity."""
+    relevant = [f for f in state["frames"] if f["status"] != "superseded"]
+    stopped = {r.get("frame_id") for r in state["restrictions"]}
+    return {root_step_id(state, f["frame_id"]) for f in relevant
+            if f["status"] == "running" and f["frame_id"] not in stopped
+            and not any(c.get("parent_frame_id") == f["frame_id"] and not frame_resolved(c) for c in relevant)}
+
+
+
+def validate_control(state):
+    if state.get("control", {}).get("status") not in {"running", "paused", "cancelled", "completed"} or state["status"] != state["control"]["status"]:
+        raise ValueError("Displayed status must agree with run control")
+
+
 def ready_steps(state):
-    if state["mode"] != "execute" or state["status"] != "running":
+    if state.get("schema_version") != 4 or state["mode"] != "execute" or state["status"] != "running" or state.get("control", {}).get("status") != "running":
         return []
     relevant = [f for f in state["frames"] if f["status"] != "superseded"]
-    if any(f["status"] == "running" for f in relevant):
+    if active_root_work(state):
         return []
-    unresolved = {f["frame_id"] for f in relevant if f.get("needs_assessment")}
-    done = {s["step_id"] for s in state["plan"] if s["status"] in {"completed", "waived"}}
-    done_skills = {s["skill_id"] for s in state["plan"] if s["status"] == "completed"}
+    def step_complete(step, resolving=()):
+        owned = {f["frame_id"] for f in relevant if f.get("step_id") == step["step_id"]}
+        owned = descendant_frame_ids(relevant, owned)
+        return step["status"] in {"completed", "waived"} and all(
+            frame_resolved(f) or (f["status"] == "completed" and f.get("needs_assessment") and f["frame_id"] in resolving)
+            for f in relevant if f["frame_id"] in owned)
+    def dependencies_ready(step):
+        done = [s for s in state["plan"] if step_complete(s, step.get("resolves_frames", []))]
+        return (set(step.get("depends_on", [])) <= {s["step_id"] for s in done}
+                and set(index[step["skill_id"]]["requires"]) <= {s["skill_id"] for s in done if s["status"] == "completed"})
     index = {s["id"]: s for s in state["registry"]["skills"] + state["temporary_skills"]}
     return [s for s in state["plan"] if s["status"] in {"pending", "failed", "blocked", "interrupted"}
-            and set(s.get("depends_on", [])) <= done
-            and unresolved <= set(s.get("resolves_frames", []))
-            and set(index[s["skill_id"]]["requires"]) <= done_skills]
+            and not step_restricted(state, s)
+            and dependencies_ready(s)
+            and all(not f.get("needs_assessment") or f["frame_id"] in s.get("resolves_frames", [])
+                    for f in relevant if f.get("step_id") == s["step_id"])
+            ]
+
+
+def select_registered_skill(state, project, skill_id, skill_path=None):
+    index = {s["id"]: s for s in state["registry"]["skills"] + state["temporary_skills"]}
+    descriptor = index.get(skill_id)
+    if not descriptor or not descriptor["enabled"] or skill_id in {"develop-system", "ask-matt"}:
+        raise ValueError("Skill is not an enabled execution capability")
+    selected_path = skill_path or descriptor.get("path")
+    if selected_path and not Path(selected_path).is_absolute():
+        selected_path = Path(state["registry_path"]).parent / selected_path
+    roots = [project / ".agents/skills", project / ".codex/skills", Path.home() / ".agents/skills",
+             Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))) / "skills"]
+    return resolve_skill(skill_id, roots=roots, explicit=selected_path)
+
 
 
 class RunStore:
@@ -187,13 +287,18 @@ class RunStore:
 
     def read(self):
         data = json.loads(self.path.read_text(encoding="utf-8"))
-        if data.get("schema_version") != 3 or data.get("controller_policy") != "dispatch-only" or data.get("mode") != "execute" or data.get("entrypoint") != "develop-system":
+        if data.get("schema_version") not in {3, 4} or data.get("controller_policy") != "dispatch-only" or data.get("mode") != "execute" or data.get("entrypoint") != "develop-system":
             raise ValueError("Legacy or navigation state requires explicit migration")
         if data.get("run_id") != self.run_id or Path(data["project_root"]).resolve() != self.project:
             raise ValueError("State belongs to another run or project")
+        if data["schema_version"] == 4:
+            validate_control(data)
         return data
 
     def write_atomic(self, state):
+        if state.get("schema_version") != 4:
+            raise ValueError("Legacy state is read-only until explicit migration")
+        validate_control(state)
         temp = self.root / (".state-" + uuid.uuid4().hex + ".tmp")
         try:
             with temp.open("x", encoding="utf-8", newline="\n") as output:
@@ -221,7 +326,8 @@ class RunStore:
                 raise ValueError("Acceptance owners must be enabled specialist skills")
             criteria.append({"id": str(i + 1), "criterion": value["criterion"], "kind": value.get("kind", "technical"),
                              "allowed_skill_ids": owners, "status": "pending", "evidence": []})
-        state = {"schema_version": 3, "controller_policy": "dispatch-only", "mode": "execute", "entrypoint": "develop-system", "run_id": self.run_id,
+        state = {"schema_version": 4, "controller_policy": "dispatch-only", "mode": "execute", "entrypoint": "develop-system", "run_id": self.run_id,
+                 "control": {"status": "running", "user_reason": None}, "restrictions": [],
                  "project_root": str(self.project), "goal": goal, "scope": [goal], "revision": 1, "status": "running",
                  "registry_path": registry_path, "registry_sha256": digest, "registry": registry, "temporary_skills": [],
                  "plan": [{**s, "status": "pending", "required": s.get("required", True)} for s in plan],
@@ -248,7 +354,9 @@ class RunStore:
                 step["status"] = "blocked"
             elif not any(f["frame_id"] == parent_frame_id and f["status"] == "running" for f in state["frames"]):
                 raise ValueError("Missing parent")
-            state["status"] = "blocked"
+            state["restrictions"].append({"kind": "missing_skill", "skill_id": skill_id,
+                "step_id": step_id or root_step_id(state, parent_frame_id),
+                "frame_id": parent_frame_id, "reason": reason})
             state["next_decision"] = {"action":"missing_skill", "skill_id":skill_id, "step_id":step_id,
                                       "parent_frame_id":parent_frame_id, "reason":reason}
             return state
@@ -257,6 +365,8 @@ class RunStore:
     def mutate(self, expected_revision, operation):
         with self.locked():
             old = self.read()
+            if old["schema_version"] != 4:
+                raise ValueError("Legacy state is read-only until explicit migration")
             if old["revision"] != expected_revision:
                 raise ValueError("Revision conflict; reread state before retrying")
             new = operation(copy.deepcopy(old))
@@ -320,23 +430,23 @@ class RunStore:
             parent = next((f for f in state["frames"] if f["frame_id"] == parent_frame_id), None)
             if parent is None or parent["status"] != "running":
                 raise ValueError("Parent is not active")
+            if child_restricted(state, parent, skill_id):
+                raise ValueError("Child is affected by unresolved scoped work")
             supersede_tree(state["frames"], {prior["frame_id"] for prior in state["frames"]
                 if prior.get("parent_frame_id") == parent_frame_id and prior["skill_id"] == skill_id
                 and prior["status"] in {"failed", "blocked", "interrupted", "stale"} and not prior.get("needs_assessment")})
-        selected_path = skill_path or descriptor.get("path")
-        if selected_path and not Path(selected_path).is_absolute():
-            selected_path = Path(state["registry_path"]).parent / selected_path
-        roots = [self.project / ".agents/skills", self.project / ".codex/skills", Path.home() / ".agents/skills",
-                 Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))) / "skills"]
         try:
-            selected = resolve_skill(skill_id, roots=roots, explicit=selected_path)
+            selected = select_registered_skill(state, self.project, skill_id, skill_path)
             mode = "skill"
         except FileNotFoundError:
             raise FileNotFoundError("Missing specialist skill; dispatch-only controller cannot execute inline: " + skill_id)
         captured = [file_evidence(item) for item in inputs]
+        prerequisites = (step if step_id is not None else parent).get("shared_preconditions", [])
         if selected["skill_path"]:
             captured.append(file_evidence(selected["skill_path"]))
         state["frames"].append({"frame_id": uuid.uuid4().hex, "parent_frame_id": parent_frame_id, "step_id": step_id,
+                                "protocol_version": 1,
+                                "shared_preconditions": copy.deepcopy(prerequisites),
                                 "skill_id": skill_id, "skill_path": selected["skill_path"], "skill_sha256": selected["sha256"], "mode": mode,
                                 "done_when": descriptor["done_when"], "status": "running", "required": step["required"] if step_id is not None else required, "input_version": input_version,
                                 "inputs": captured, "artifacts": [], "needs_assessment": False})
@@ -352,6 +462,13 @@ class RunStore:
             selected_frame = next((f for f in state["frames"] if f["frame_id"] == item.get("frame_id")), None)
             if selected_frame is None or item["mode"] != selected_frame["mode"]:
                 raise ValueError("Return mode does not match dispatched frame")
+            if item.get("block_scope", "local") not in {"local", "unknown"}:
+                raise ValueError("Block scope must be local or explicitly unknown")
+            if item["status"] == "completed" and any(
+                    r.get("frame_id") == selected_frame["frame_id"] or
+                    (selected_frame.get("step_id") is not None and r.get("step_id") == selected_frame["step_id"])
+                    for r in state["restrictions"]):
+                raise ValueError("Necessary scoped restrictions remain unresolved")
             if item["status"] == "skipped" and (selected_frame["required"] or not item.get("skip_reason")):
                 raise ValueError("Only optional frames with a reason can be skipped")
             item["artifacts"] = [file_evidence(a) for a in item["artifacts"]]
@@ -423,19 +540,27 @@ class RunStore:
             frame["checks"] = item["checks"]
             frame["acceptance_checks"] = acceptance
             frame["resolved_findings"] = resolutions
+            frame["block_scope"] = item.get("block_scope", "local")
             if item["status"] == "skipped":
                 frame["skip_reason"] = item["skip_reason"]
             if frame.get("step_id"):
                 step = next(s for s in updated["plan"] if s["step_id"] == frame["step_id"])
                 step["status"] = item["status"]
-            if item["status"] in {"waiting_user", "blocked", "cancelled"}:
-                updated["status"] = item["status"]
+            # A specialist's local outcome does not change user run control.
             if item["status"] in {"failed", "blocked"}:
-                signature = (item["skill_id"], item.get("input_version"), item["blockers"], item["artifacts"], item["checks"])
-                matching = [e for e in updated["events"] if (e["skill_id"], e.get("input_version"), e["blockers"], e["artifacts"], e["checks"]) == signature]
+                def signature(event):
+                    owner = next(f for f in updated["frames"] if f["frame_id"] == event["frame_id"])
+                    return (owner.get("step_id"), owner.get("parent_frame_id"), event["skill_id"],
+                            event.get("input_version"), event["status"], event["blockers"], event["artifacts"], event["checks"])
+                current_signature = signature(item)
+                matching = [e for e in updated["events"] if signature(e) == current_signature]
                 if len(matching) >= 2:
-                    updated["status"] = "blocked"
-                    updated["next_decision"] = {"action": "stop_repeated_no_progress", "signature": list(signature)}
+                    restriction = {"kind": "no_progress", "step_id": root_step_id(updated, frame["frame_id"]),
+                                   "frame_id": frame["frame_id"], "signature": list(current_signature)}
+                    if restriction not in updated["restrictions"]:
+                        updated["restrictions"].append(restriction)
+                    updated["next_decision"] = {"action": "stop_repeated_no_progress", "signature": list(current_signature),
+                                                "frame_id": frame["frame_id"], "scope": "local"}
             return updated
         return self.mutate(revision, change)
 
@@ -592,6 +717,7 @@ class RunStore:
             if state["status"] in {"completed", "cancelled"}:
                 raise ValueError("Run is already closed")
             state["status"] = status
+            state["control"] = {"status": status, "user_reason": reason}
             state["next_decision"] = {"action": status, "user_reason": reason}
             return state
         return self.mutate(revision, change)
@@ -600,6 +726,16 @@ class RunStore:
         def change(state):
             if state["status"] in {"completed", "cancelled"}:
                 raise ValueError("Closed run needs a new explicit goal")
+            remaining = []
+            for restriction in state["restrictions"]:
+                if restriction["kind"] == "missing_skill":
+                    try:
+                        select_registered_skill(state, self.project, restriction["skill_id"])
+                    except (OSError, ValueError):
+                        remaining.append(restriction)
+                else:
+                    remaining.append(restriction)
+            state["restrictions"] = remaining
             stale = set()
             for frame in state["frames"]:
                 if frame["status"] == "superseded":
@@ -642,6 +778,7 @@ class RunStore:
                 for criterion in state["acceptance"]:
                     criterion.update(status="pending", evidence=[])
             state["status"] = "running"
+            state["control"] = {"status": "running", "user_reason": None}
             state["next_decision"] = {"action": "revalidate_and_select", "invalidated_steps": sorted(stale),
                                       "note": "File hashes do not prove live runtime health; recheck environmental blockers and actual verification."}
             return state
@@ -676,6 +813,7 @@ class RunStore:
                 criterion.update(status="passed", evidence=[file_evidence(e) for e in check["evidence"]],
                                  source_frame_id=source["frame_id"], source_skill_id=source["skill_id"], kind=check["kind"])
             state["status"] = "completed"
+            state["control"]["status"] = "completed"
             state["next_decision"] = {"action": "complete", "return_to": "develop-system"}
             return state
         return self.mutate(revision, change)

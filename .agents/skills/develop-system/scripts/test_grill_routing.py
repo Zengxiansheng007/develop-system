@@ -35,7 +35,7 @@ class GrillRoutingTests(unittest.TestCase):
     def grill_event(self, state, delivery=None):
         frame = state['frames'][-1]
         delivery = delivery or self.delivery()
-        return {'event_id':frame['frame_id'] + '-return', 'run_id':state['run_id'],
+        return {'protocol_version':1, 'event_id':frame['frame_id'] + '-return', 'run_id':state['run_id'],
                 'frame_id':frame['frame_id'], 'parent_frame_id':frame['parent_frame_id'],
                 'skill_id':frame['skill_id'], 'input_version':frame['input_version'],
                 'mode':'skill', 'execution':'sequential', 'status':'completed', 'return_to':'develop-system',

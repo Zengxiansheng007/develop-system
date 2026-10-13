@@ -1,6 +1,6 @@
 # 路由与回流协议
 
-字段及职责以 [统一执行协议](codex-runtime.md) 为准。状态 schema v3，注册表 schema v2，均声明 controller_policy: dispatch-only。
+字段及职责以[统一执行协议](codex-runtime.md)为准；当前 T01 候选的状态和版本边界见[作用范围](scoped-state.md)。
 
 ## 分派
 
@@ -23,4 +23,4 @@
 - 必要帧不能跳过；非必要子帧可带理由跳过。范围外建议不追加必做清单。
 - 缺失技能阻塞，无法用 inline 或调度器自己完成替代。
 - waiting_user 保存真实未答问题/未完成人工操作；blocked 保存依赖/环境限制；paused/cancelled 只依据用户明确要求。
-- schema v1/v2 不自动迁移，专业技能核验后在 v3 新 run 登记结论并注明旧来源。
+- v3 只读，v1/v2 不自动迁移；当前候选的实际迁移能力尚待后续票，保留旧运行身份与原版本。

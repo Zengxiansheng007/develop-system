@@ -28,7 +28,7 @@ license: MIT
 
 1. 读取当前项目 AGENTS.md、目标、范围与已有产物；当前指令优先于旧笔记。验收条件从用户目标或规格提取，语义不明确时分派需求技能。
 2. 读取 [registry.json](registry.json) 与 [统一执行协议](references/codex-runtime.md)，按任务裁剪计划。已有有效规格、测试或评审结果可复用，来源及版本须保留。
-3. 使用 [状态工具](references/state-operations.md) 创建/恢复目标项目独立 run。旧 schema v1/v2 不自动续跑；当前 v3 只登记专业技能来源的结论。
+3. 使用 [状态工具](references/state-operations.md) 创建/恢复目标项目独立 run。当前候选创建 v4；v3 只读，显式迁移能力另行交付，v1/v2 不自动续跑。局部限制见[作用范围](references/scoped-state.md)。
    直接 grill、受管访谈或恢复访谈时，先读取 [grill 入口与回流操作](references/grill-routing.md)，通过只读判定确认归属，不使用历史最新运行猜测。
 4. 解析实际技能路径并读取正文，记录文件 hash。用户路径和会话目录优先；目录未列出时按项目 .agents/skills、.codex/skills、用户 .agents/skills、.codex/skills 查找。同名只选一个版本。
 5. 分派最早就绪且必要的工作。模板是可裁剪路线，不是每个任务都必须执行全部技能。
@@ -50,6 +50,6 @@ license: MIT
 - 技能缺失准确记录 blocked；可继续独立工作，但不得声称调用了未安装技能。未来能力通过 [扩展接口](references/extensions.md) 接入，临时能力仅保存当前运行。
 - 同技能、同输入、同阻塞两次无新证据时停止重复，报告需要的信息或环境变化。
 - 输入、代码、测试或评审证据发生变化，按依赖失效规则重新分派对应专业技能；哈希一致不证明运行环境健康。
-- 真实阻塞/人工等待保存 blocked/waiting_user；仅用户明确暂停/取消时记 paused/cancelled。等待时间不是答复。
+- 局部阻塞/等待/取消保留在所属工作；用户明确暂停/取消才改变全局控制。作用范围不明时保留限制，等待时间不是答复。
 
 本技能是代理遵守的调度协议及状态工具，不注册系统完成钩子；会话结束后依靠显式恢复继续。

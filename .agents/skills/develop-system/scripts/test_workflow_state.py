@@ -33,7 +33,7 @@ class DurableWorkflowTests(unittest.TestCase):
 
     def event(self, state, status="completed", **kwargs):
         frame = state["frames"][-1]
-        return {"event_id": frame["frame_id"] + "-return", "run_id": "test-run", "frame_id": frame["frame_id"],
+        return {"protocol_version": 1, "event_id": frame["frame_id"] + "-return", "run_id": "test-run", "frame_id": frame["frame_id"],
                 "parent_frame_id": frame["parent_frame_id"], "skill_id": frame["skill_id"], "input_version": frame["input_version"],
                 "mode": frame["mode"], "execution": "sequential", "status": status, "return_to": "develop-system",
                 "completion_checked": True, "artifacts": [str(self.output)] if status == "completed" else [],
@@ -175,7 +175,7 @@ class DurableWorkflowTests(unittest.TestCase):
         for _ in range(2):
             state = self.dispatch(state)
             state = self.receive(state, status="failed")
-        self.assertEqual(state["status"], "blocked")
+        self.assertEqual(state["status"], "running")
         self.assertEqual(state["next_decision"]["action"], "stop_repeated_no_progress")
         self.assertEqual(ready_steps(state), [])
 
@@ -229,7 +229,7 @@ class DurableWorkflowTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.store.resume(state["revision"])
         state["schema_version"] = 1
-        self.store.write_atomic(state)
+        self.store.path.write_text(json.dumps(state), encoding="utf-8")
         with self.assertRaises(ValueError):
             self.store.read()
 
@@ -282,7 +282,7 @@ class DurableWorkflowTests(unittest.TestCase):
             self.dispatch(state)
         self.assertEqual(self.store.read()["frames"], [])
         state = self.store.block_unavailable(state["revision"], "matt-research", "file missing", "research-step")
-        self.assertEqual(state["status"], "blocked")
+        self.assertEqual(state["status"], "running")
         self.assertEqual(state["next_decision"]["action"], "missing_skill")
         path.write_text("---\nname: matt-research\ndescription: restored\n---\n", encoding="utf-8")
         state = self.store.resume(state["revision"])
@@ -309,7 +309,7 @@ class DurableWorkflowTests(unittest.TestCase):
     def test_legacy_v2_cannot_restore_controller_owned_acceptance(self):
         state = self.create()
         state["schema_version"] = 2
-        self.store.write_atomic(state)
+        self.store.path.write_text(json.dumps(state), encoding="utf-8")
         with self.assertRaises(ValueError):
             self.store.read()
 

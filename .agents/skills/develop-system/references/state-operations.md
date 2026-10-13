@@ -41,7 +41,9 @@ return --payload <结果文件> 的结构见 [统一执行协议](codex-runtime.
 - 中断旧帧由重新分派替代全部后代，旧结果不能覆盖新帧。
 - 环境健康由对应专业技能实际验证；哈希一致不证明服务存活。
 - 同技能/输入/阻塞两次无进展停止重试；用户明确暂停/取消时 pause/cancel --reason，完成或取消 run 不恢复。
-- 当前 state schema v3、registry v2。旧 v1/v2 不自动续跑：让对应专业技能核验旧证据并在新 v3 run 返回来源明确的结论，注明旧 run，不把旧调度器的验收视为专业结果。
+- 当前 T01 候选创建 state v4，registry 仍为 v2；新帧及回流必须携带 protocol_version: 1。v3 可 show，只读状态不能 dispatch/return/resume/control/complete；v1/v2 仍拒绝自动续跑。显式迁移和 registry v3 由后续票交付，不能据此候选采用到旧运行。
+
+局部限制、就绪与完成的含义见[作用范围](scoped-state.md)。
 
 ## 扩展与测试
 
