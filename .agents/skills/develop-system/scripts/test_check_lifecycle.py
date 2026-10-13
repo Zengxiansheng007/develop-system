@@ -77,6 +77,64 @@ class CheckLifecycleTests(unittest.TestCase):
         self.assertEqual(state['events'][0]['event_id'],event['event_id'])
         self.assertEqual(path.read_bytes(),original)
 
+    def assert_reference_resume_closure(self, child_source=False):
+        upstream=self.root/'upstream.txt'
+        upstream.write_text('synthetic original input',encoding='utf-8')
+        conclusion=self.root/'conclusion.txt'
+        conclusion.write_text('synthetic professional conclusion',encoding='utf-8')
+        self.state=self.store.dispatch(self.state['revision'],'implement','upstream-v1','a',inputs=[str(upstream)])
+        parent=self.state['frames'][-1]
+        def finish(frame):
+            event=self.event(frame,conclusion);event.update(checks=[],artifacts=[str(conclusion)])
+            self.state=self.store.receive(self.state['revision'],event)
+        if child_source:
+            self.state=self.store.dispatch(self.state['revision'],'domain-modeling','source-v1',
+                parent_frame_id=parent['frame_id'],worktree=self.authorization())
+        else:
+            finish(parent)
+            self.state=self.store.extend_plan(self.state['revision'],
+                [{'step_id':'source','skill_id':'domain-modeling','depends_on':['a']}],'synthetic dependency')
+            self.state=self.store.dispatch(self.state['revision'],'domain-modeling','source-v1','source',worktree=self.authorization())
+        source=self.state['frames'][-1];path,record=self.check(source)
+        self.assertEqual(record['status'],'passed',record['error'])
+        original=path.read_bytes()
+        self.state=self.store.receive(self.state['revision'],self.event(source,path))
+        if child_source:finish(parent)
+        reviewer,event=self.review(source,path,record)
+        self.state=self.store.receive(self.state['revision'],event)
+        self.state=self.store.extend_plan(self.state['revision'],[
+            {'step_id':'downstream','skill_id':'codebase-design','depends_on':['review']},
+            {'step_id':'valid','skill_id':'codebase-design'},
+            {'step_id':'inflight','skill_id':'domain-modeling'},
+            {'step_id':'independent','skill_id':'codebase-design'}],'synthetic authorized work')
+        completed=[]
+        for step,skill in [('downstream','codebase-design'),('valid','codebase-design')]:
+            self.state=self.store.dispatch(self.state['revision'],skill,step+'-v1',step)
+            frame=self.state['frames'][-1];finish(frame);completed.append(frame['frame_id'])
+        if child_source:
+            self.state=self.store.dispatch(self.state['revision'],'domain-modeling','inflight-v1','inflight')
+            inflight=self.state['frames'][-1]
+        history=copy.deepcopy(self.state['events'])
+        upstream.write_text('synthetic changed input',encoding='utf-8')
+        self.state=self.store.resume(self.state['revision'])
+        frames={f['frame_id']:f for f in self.state['frames']}
+        for frame_id in (parent['frame_id'],source['frame_id'],reviewer['frame_id'],completed[0]):
+            self.assertEqual(frames[frame_id]['status'],'stale')
+        self.assertEqual(frames[completed[1]]['status'],'completed')
+        self.assertEqual(self.state['events'],history)
+        self.assertEqual(path.read_bytes(),original)
+        if child_source:
+            self.assertEqual(frames[inflight['frame_id']]['status'],'running')
+            finish(inflight)  # Release the existing capacity; no second resume.
+        self.state=self.store.dispatch(self.state['revision'],'codebase-design','independent-v1','independent')
+        self.assertEqual(self.state['frames'][-1]['status'],'running')
+
+    def test_resume_closes_plan_dependency_and_reference_chain_once(self):
+        self.assert_reference_resume_closure()
+
+    def test_resume_closes_descendant_reference_chain_preserving_independent_inflight(self):
+        self.assert_reference_resume_closure(child_source=True)
+
     def test_identical_replacement_requires_new_binding_and_execution_then_move_invalidates(self):
         source=self.dispatch()
         path,record=self.check(source)

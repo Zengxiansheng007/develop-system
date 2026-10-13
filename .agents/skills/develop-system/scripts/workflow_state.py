@@ -887,29 +887,32 @@ class RunStore:
             state["restrictions"] = remaining
             stale = set()
             affected = set()
+            def invalidate(frame):
+                newly_stale = frame["status"] != "stale"
+                frame["status"] = "stale"
+                affected.add(root_step_id(state, frame["frame_id"]))
+                if frame.get("step_id"):
+                    stale.add(frame["step_id"])
+                parent = frame.get("parent_frame_id")
+                while parent:
+                    ancestor = next(f for f in state["frames"] if f["frame_id"] == parent)
+                    # Child changes invalidate completion, not independent sibling inputs.
+                    if ancestor["status"] == "completed" or (
+                            ancestor["status"] == "running" and ancestor.get("completion_invalidated_by")):
+                        ancestor["status"] = "running"
+                        causes = ancestor.setdefault("completion_invalidated_by", [])
+                        if frame["frame_id"] not in causes:
+                            causes.append(frame["frame_id"])
+                        if ancestor.get("step_id"):
+                            next(s for s in state["plan"] if s["step_id"] == ancestor["step_id"])["status"] = "running"
+                    parent = ancestor.get("parent_frame_id")
+                return newly_stale
             for frame in state["frames"]:
                 if frame["status"] == "superseded":
                     continue
                 evidence = frame_evidence(frame) + [e for a in state["assessments"] if a["frame_id"] == frame["frame_id"] for e in a["evidence"]]
                 if not all(evidence_is_current(e) for e in evidence) or not frame_is_current(state, frame):
-                    frame["status"] = "stale"
-                    affected.add(root_step_id(state, frame["frame_id"]))
-                    if frame.get("step_id"):
-                        stale.add(frame["step_id"])
-                    parent = frame.get("parent_frame_id")
-                    while parent:
-                        ancestor = next(f for f in state["frames"] if f["frame_id"] == parent)
-                        # Child changes invalidate a parent's completion, not all
-                        # independent child inputs. Keep its identity for requalification.
-                        if ancestor["status"] == "completed" or (
-                                ancestor["status"] == "running" and ancestor.get("completion_invalidated_by")):
-                            ancestor["status"] = "running"
-                            causes = ancestor.setdefault("completion_invalidated_by", [])
-                            if frame["frame_id"] not in causes:
-                                causes.append(frame["frame_id"])
-                            if ancestor.get("step_id"):
-                                next(s for s in state["plan"] if s["step_id"] == ancestor["step_id"])["status"] = "running"
-                        parent = ancestor.get("parent_frame_id")
+                    invalidate(frame)
             changed = True
             capabilities = {s["id"]: s for s in state["registry"]["skills"] + state["temporary_skills"]}
             while changed:
@@ -920,16 +923,21 @@ class RunStore:
                         or set(capabilities[step["skill_id"]]["requires"]) & affected_skills)
                     if dependency_changed and step["step_id"] not in stale:
                         stale.add(step["step_id"]); affected.add(step["step_id"]); changed = True
+                invalidated = descendant_frame_ids(state["frames"],
+                    {f["frame_id"] for f in state["frames"] if f["status"] == "stale" or f.get("step_id") in stale})
+                frames = {f["frame_id"]: f for f in state["frames"]}
+                for frame in state["frames"]:
+                    if frame["status"] in {"stale", "superseded"}:
+                        continue
+                    # References add dependency edges without relabeling execution.
+                    # Close these edges together with plan and descendant changes.
+                    source_changed = any(frames[check["reference"]["frame_id"]]["status"] != "completed"
+                        for check in frame.get("checks", []) if check.get("reference"))
+                    if frame["frame_id"] in invalidated or source_changed:
+                        changed = invalidate(frame) or changed
             for step in state["plan"]:
                 if step["step_id"] in stale:
                     step["status"] = "pending"
-            for frame in state["frames"]:
-                if frame.get("step_id") in stale and frame["status"] != "superseded":
-                    frame["status"] = "stale"
-            invalidated = descendant_frame_ids(state["frames"], {f["frame_id"] for f in state["frames"] if f["status"] == "stale"})
-            for frame in state["frames"]:
-                if frame["frame_id"] in invalidated and frame["status"] != "superseded":
-                    frame["status"] = "stale"
             for assessment in state["assessments"]:
                 source = next(f for f in state["frames"] if f["frame_id"] == assessment["source_frame_id"])
                 if source["status"] in {"stale", "superseded", "interrupted"}:
