@@ -511,7 +511,7 @@ class RunStore:
             if temp.is_file():
                 temp.unlink()
 
-    def preview_migration(self, target_registry=SKILL_ROOT / "registry.json"):
+    def preview_migration(self, target_registry=SKILL_ROOT / "registry.json", adoption=None):
         """Describe a v3 source against this candidate without mutating either."""
         from migration_preview import build_preview
         before = self.path.read_bytes()
@@ -519,9 +519,22 @@ class RunStore:
         if json.loads(before) != state:
             raise ValueError("Source changed while reading migration preview")
         result = build_preview(state, before, self.path, SKILL_ROOT, target_registry)
+        if adoption is not None:
+            from run_migration import bind_adoption
+            result['adoption'] = bind_adoption(result, adoption)
         if self.path.read_bytes() != before:
             raise ValueError("Source changed while preparing migration preview")
         return result
+
+    def apply_migration(self, preview):
+        """Explicitly adopt one reviewed source/target under the ordinary run lock."""
+        from run_migration import apply
+        return apply(self, preview)
+
+    def rollback_migration(self, revision, receipt):
+        """Restore only an unchanged adoption with its exact original version material."""
+        from run_migration import rollback
+        return rollback(self, revision, receipt)
 
     def create(self, goal, plan, acceptance, registry_path=SKILL_ROOT / "registry.json"):
         registry, registry_path, digest = load_registry(registry_path)
@@ -1162,7 +1175,7 @@ class RunStore:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["init", "show", "next", "preview-migration", "inspect-grill", "attach-grill", "route-grill", "dispatch", "block", "return", "register", "extend-plan", "assess", "resume", "complete", "pause", "cancel"])
+    parser.add_argument("command", choices=["init", "show", "next", "preview-migration", "apply-migration", "rollback-migration", "inspect-grill", "attach-grill", "route-grill", "dispatch", "block", "return", "register", "extend-plan", "assess", "resume", "complete", "pause", "cancel"])
     parser.add_argument("--entry", required=True, choices=["develop-system", "ask-matt"])
     parser.add_argument("--project-root", required=True)
     parser.add_argument("--run-id", required=True)
@@ -1171,6 +1184,7 @@ def main():
     parser.add_argument("--plan")
     parser.add_argument("--acceptance")
     parser.add_argument("--registry", default=str(SKILL_ROOT / "registry.json"))
+    parser.add_argument("--adoption", help="Explicit single-run authorization and original-version evidence JSON")
     parser.add_argument("--skill-id")
     parser.add_argument("--step-id")
     parser.add_argument("--parent-frame-id")
@@ -1202,13 +1216,19 @@ def main():
         elif args.command == "init":
             value = store.create(args.goal, read(args.plan), read(args.acceptance), args.registry)
         elif args.command == "preview-migration":
-            value = store.preview_migration(args.registry)
+            value = store.preview_migration(args.registry, read(args.adoption) if args.adoption else None)
         elif args.command in {"show", "next"}:
             state = store.read();value = state if args.command == "show" else {"ready_steps": ready_steps(state), "next_decision": state["next_decision"]}
         else:
             if args.revision is None:
                 raise ValueError("Mutation requires the revision returned by show")
-            if args.command == "dispatch":
+            if args.command == "apply-migration":
+                preview = read(args.payload)
+                if preview['source']['revision'] != args.revision:
+                    raise ValueError('Adoption revision must match the reviewed preview')
+                value = store.apply_migration(preview)
+            elif args.command == "rollback-migration":value = store.rollback_migration(args.revision, read(args.payload))
+            elif args.command == "dispatch":
                 value = store.dispatch(args.revision,args.skill_id,args.input_version,args.step_id,args.parent_frame_id,args.input,args.skill_path,args.require_original,not args.optional,
                     worktree=read(args.worktree) if args.worktree else None)
             elif args.command == 'attach-grill':value = store.attach_grill(args.revision,read(args.payload),args.input,args.skill_path)

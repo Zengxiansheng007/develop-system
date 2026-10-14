@@ -1,4 +1,4 @@
-# Codex统一执行协议：state v4 / registry v3 / 回流代次 1（首批 T01–T08 候选）
+# Codex统一执行协议：state v4 / registry v3 / 回流代次 1（首批 T01–T09 候选）
 
 本协议的帧/状态/强制回流仅在显式 develop-system 流程内启用。流程外技能返回调用方。ask-matt 纯导航，不建帧、不分派、不写状态。
 
@@ -68,7 +68,7 @@ resolved_findings 为专业技能确认已处理的旧 frame_id 数组；结论�
 
 Windows 使用 PowerShell 原生命令，人工向导匹配实际 Bash/WSL/PowerShell 环境。打开文件不表示执行或验证完成。
 
-状态工具见[状态操作](state-operations.md)，扩展见[扩展接口](extensions.md)。需要评估 v3 采用候选版本时，先用[只读迁移预览](migration-preview.md)核对原身份、历史依据与待核验清单；实际采用/回滚和旧帧兼容仍由 #10/#11 交付。v1/v2 不自动续跑。
+状态工具见[状态操作](state-operations.md)，扩展见[扩展接口](extensions.md)。需要评估或明确采用 v3 运行时，按[迁移协议](migration-preview.md)核对原身份、历史依据、授权与精确目标，再处理切换和有条件恢复；旧帧继续执行与旧证据资格仍由 #11 交付。v1/v2 不自动续跑。
 
 ## 命令检查证据
 
