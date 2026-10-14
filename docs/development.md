@@ -32,4 +32,4 @@ Update source and related tests/documentation together. Add or remove shipped sk
 
 Use GitHub Issues in this repository for new develop-system work. The previous local optimization map retains its authority until an explicit map publication records old-to-new links; repository setup does not duplicate its tickets.
 
-See `releases.md` for candidate creation, verification and publication.
+For first-batch source naming, historical byte reconciliation and whole-branch acceptance, see [first-batch integration](first-batch.md). See `releases.md` for candidate creation, verification and publication.

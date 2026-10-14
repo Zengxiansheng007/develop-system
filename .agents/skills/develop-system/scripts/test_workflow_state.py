@@ -24,13 +24,13 @@ class DurableWorkflowTests(unittest.TestCase):
         self.output = self.root / "output.txt"
         self.output.write_text("verified output", encoding="utf-8")
         self.store = RunStore(self.root, "test-run")
-        self.plan = [{"step_id": "research-step", "skill_id": "matt-research"},
+        self.plan = [{"step_id": "research-step", "skill_id": "research"},
                      {"step_id": "spec-step", "skill_id": "to-spec", "depends_on": ["research-step"]}]
 
     def create(self, plan=None):
         return self.store.create("fixture goal", plan or self.plan, ["deliver verified output"], self.registry)
 
-    def dispatch(self, state, skill="matt-research", step="research-step", parent=None, **kwargs):
+    def dispatch(self, state, skill="research", step="research-step", parent=None, **kwargs):
         return self.store.dispatch(state["revision"], skill, "input-v1", step if parent is None else None, parent, **kwargs)
 
     def event(self, state, status="completed", **kwargs):
@@ -50,6 +50,17 @@ class DurableWorkflowTests(unittest.TestCase):
     def complete(self, state):
         source = state["frames"][-1]["frame_id"] if state["frames"] else "missing"
         return self.store.complete(state["revision"], [{"id": "1", "source_frame_id": source}])
+
+    def test_default_bundle_dispatches_canonical_research_source(self):
+        # Source resolution only; this fixture does not execute research or a model.
+        state = self.store.create('canonical source selection',
+            [{'step_id': 'research', 'skill_id': 'research'}], ['source identity'], SKILL_ROOT / 'registry.json')
+        selected = self.store.preflight('research')['research']
+        state = self.store.dispatch(state['revision'], 'research', 'canonical-v1', 'research')
+        frame = state['frames'][-1]
+        self.assertEqual(frame['skill_path'], str((SKILL_ROOT.parent / 'research/SKILL.md').resolve()))
+        self.assertEqual(frame['skill_sha256'], selected['sha256'])
+        self.assertNotIn('matt-research', [s['id'] for s in state['registry']['skills']])
 
     def test_navigation_cannot_even_create_state_directory(self):
         for entry in ("ask-matt", "/ask-matt", "$ask-matt"):
@@ -105,7 +116,7 @@ class DurableWorkflowTests(unittest.TestCase):
     def test_revision_and_exclusive_lock_prevent_overwrite(self):
         state = self.create()
         with self.assertRaises(ValueError):
-            self.store.dispatch(0, "matt-research", "v", "research-step")
+            self.store.dispatch(0, "research", "v", "research-step")
         with self.store.locked():
             with self.assertRaises(FileExistsError):
                 self.dispatch(state)
@@ -189,7 +200,7 @@ class DurableWorkflowTests(unittest.TestCase):
         original = self.registry.read_bytes()
         path = self.root / "custom.md"
         path.write_text("---\nname: future-skill\ndescription: fixture\n---\n", encoding="utf-8")
-        descriptor = copy.deepcopy(next(s for s in state["registry"]["skills"] if s["id"] == "matt-research"))
+        descriptor = copy.deepcopy(next(s for s in state["registry"]["skills"] if s["id"] == "research"))
         descriptor.update(id="future-skill", path=str(path), requires=[], next_candidates=[])
         state = self.store.register(state["revision"], descriptor)
         state = self.dispatch(state)
@@ -201,7 +212,7 @@ class DurableWorkflowTests(unittest.TestCase):
     def test_findings_route_to_in_scope_repair_before_assessment_and_completion(self):
         state = self.receive(self.dispatch(self.create([self.plan[0]])), findings=["in-scope defect"])
         review_frame = state["frames"][0]["frame_id"]
-        state = self.store.extend_plan(state["revision"], [{"step_id": "repair", "skill_id": "matt-research",
+        state = self.store.extend_plan(state["revision"], [{"step_id": "repair", "skill_id": "research",
              "depends_on": ["research-step"], "resolves_frames": [review_frame]}], "repair verified in-scope defect")
         self.assertEqual([s["step_id"] for s in ready_steps(state)], ["repair"])
         state = self.receive(self.dispatch(state, step="repair"), resolved_findings=[review_frame])
@@ -245,7 +256,7 @@ class DurableWorkflowTests(unittest.TestCase):
             self.store.complete(state["revision"], [{"id":"1", "status":"passed", "completion_checked":True,
                                                    "evidence":[str(self.output)]}])
         self.assertEqual(self.store.path.read_bytes(), before)
-        self.assertEqual(self.complete(state)["acceptance"][0]["source_skill_id"], "matt-research")
+        self.assertEqual(self.complete(state)["acceptance"][0]["source_skill_id"], "research")
 
     def test_missing_or_failed_specialist_conclusion_cannot_close_run(self):
         for conclusions in ([], [{"id":"1", "status":"failed", "completion_checked":True, "kind":"technical", "evidence":[str(self.output)]}]):
@@ -279,17 +290,17 @@ class DurableWorkflowTests(unittest.TestCase):
 
     def test_missing_skill_blocks_without_creating_inline_frame(self):
         data = json.loads(self.registry.read_text(encoding="utf-8"))
-        item = next(s for s in data["skills"] if s["id"] == "matt-research")
+        item = next(s for s in data["skills"] if s["id"] == "research")
         path = Path(item["path"])
         state = self.create([self.plan[0]])
         path.unlink()
         with self.assertRaises(FileNotFoundError):
             self.dispatch(state)
         self.assertEqual(self.store.read()["frames"], [])
-        state = self.store.block_unavailable(state["revision"], "matt-research", "file missing", "research-step")
+        state = self.store.block_unavailable(state["revision"], "research", "file missing", "research-step")
         self.assertEqual(state["status"], "running")
         self.assertEqual(state["next_decision"]["action"], "missing_skill")
-        path.write_text("---\nname: matt-research\ndescription: restored\n---\n", encoding="utf-8")
+        path.write_text("---\nname: research\ndescription: restored\n---\n", encoding="utf-8")
         state = self.store.resume(state["revision"])
         self.assertEqual(self.dispatch(state)["frames"][-1]["mode"], "skill")
 

@@ -22,7 +22,7 @@ class RegistryTests(unittest.TestCase):
 
     def test_new_skill_and_new_stage(self):
         self.data["stages"].append("release-validation")
-        item = copy.deepcopy(self.skill("matt-research"))
+        item = copy.deepcopy(self.skill("research"))
         item.update(id="release-check", stage="release-validation", requires=["code-review"], next_candidates=["pr"])
         self.data["skills"].append(item)
         self.data["default_flows"]["release"] = ["code-review", "release-check", "pr"]
@@ -38,7 +38,7 @@ class RegistryTests(unittest.TestCase):
         self.assertTrue(any("Dependency cycle" in error for error in validate(self.data, self.root)))
 
     def test_missing_route(self):
-        self.skill("matt-research")["next_candidates"] = ["not-installed-or-registered"]
+        self.skill("research")["next_candidates"] = ["not-installed-or-registered"]
         self.assertTrue(any("unknown next_candidates" in error for error in validate(self.data, self.root)))
 
     def test_disabled_route(self):
@@ -50,8 +50,8 @@ class RegistryTests(unittest.TestCase):
         self.assertTrue(any("Duplicate skill" in error for error in validate(self.data, self.root)))
 
     def test_inline_fallback_and_executable_body_are_rejected(self):
-        self.skill("matt-research")["fallback"] = "inline"
-        self.skill("matt-research")["inline"] = "controller does research"
+        self.skill("research")["fallback"] = "inline"
+        self.skill("research")["inline"] = "controller does research"
         errors = validate(self.data, self.root)
         self.assertTrue(any("invalid fallback" in e for e in errors))
         self.assertTrue(any("inline execution is forbidden" in e for e in errors))
@@ -63,9 +63,9 @@ class RegistryTests(unittest.TestCase):
     def test_explicit_extension_path(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "SKILL.md"
-            self.skill("matt-research")["path"] = str(path)
+            self.skill("research")["path"] = str(path)
             self.assertTrue(any("does not exist" in error for error in validate(self.data, self.root)))
-            path.write_text("---\nname: matt-research\ndescription: research\n---\n", encoding="utf-8")
+            path.write_text("---\nname: research\ndescription: research\n---\n", encoding="utf-8")
             self.assertEqual(validate(self.data, self.root), [])
 
 

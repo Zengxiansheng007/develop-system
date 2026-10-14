@@ -122,7 +122,7 @@
       "path": "../grill-with-docs/SKILL.md"
     },
     {
-      "id": "matt-research",
+      "id": "research",
       "stage": "requirements-design",
       "role": "auxiliary",
       "enabled": true,
