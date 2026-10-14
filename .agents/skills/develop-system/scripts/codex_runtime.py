@@ -60,16 +60,24 @@ def delegation_mode(authorized, available, free_slots, requested_workers=1, in_c
 RETURN_STATUSES = {"completed", "failed", "blocked", "waiting_user", "skipped", "cancelled"}
 
 
-def children_resolved(frame, frames):
+def children_resolved(frame, frames, state=None):
     """Current-parent duties include helpers that have not been dispatched yet."""
     obligations = frame.get("completion_obligations")
+    if obligations is None and state is not None:
+        from legacy_compat import obligations as qualified_obligations
+        obligations = qualified_obligations(state, frame)
     if not isinstance(obligations, list):
         return False
     children = [child for child in frames if child.get("parent_frame_id") == frame["frame_id"]
                 and child["status"] != "superseded"]
     def resolved(child):
-        return (child["status"] == "completed" or (child["status"] == "skipped" and child.get("required") is False
+        basic = (child["status"] == "completed" or (child["status"] == "skipped" and child.get("required") is False
             and child.get("skip_reason"))) and not child.get("needs_assessment")
+        if basic and state is not None:
+            from legacy_compat import original_frame, current_qualification
+            if original_frame(state, child):
+                return bool(current_qualification(state, child)) and children_resolved(child, frames, state)
+        return basic
     return all(resolved(child) for child in children) and all(any(
         child["status"] == "completed" and child.get("required") is True and resolved(child)
         and all(child.get(key) == duty[key] for key in ("skill_id", "skill_path", "skill_sha256"))
@@ -107,7 +115,11 @@ def accept_result(state, result):
     frame = frames.get(result["frame_id"])
     if frame is None or frame["skill_id"] != result["skill_id"] or frame.get("parent_frame_id") != result["parent_frame_id"]:
         raise ValueError("Unknown or mismatched frame")
-    if frame.get("protocol_version") != 1 or type(result.get("protocol_version")) is not int or result["protocol_version"] != frame["protocol_version"]:
+    from legacy_compat import original_frame, current_qualification
+    if original_frame(state, frame):
+        if 'protocol_version' in result or not current_qualification(state, frame):
+            raise ValueError('Preserved legacy result still requires current professional qualification')
+    elif frame.get("protocol_version") != 1 or type(result.get("protocol_version")) is not int or result["protocol_version"] != frame["protocol_version"]:
         raise ValueError("Return protocol version does not match the dispatched frame")
     if "input_version" in frame and result.get("input_version") != frame["input_version"]:
         raise ValueError("Result belongs to an obsolete input version")
@@ -116,7 +128,7 @@ def accept_result(state, result):
     parent_id = frame.get("parent_frame_id")
     if parent_id is not None and (parent_id not in frames or frames[parent_id]["status"] != "running"):
         raise ValueError("Parent frame is missing or no longer active")
-    if result["status"] == "completed" and not children_resolved(frame, list(frames.values())):
+    if result["status"] == "completed" and not children_resolved(frame, list(frames.values()), state):
         raise ValueError("Parent cannot complete with unresolved child work")
     frame["status"] = result["status"]
     frame["needs_assessment"] = bool(result["findings"] or result["blockers"])
@@ -127,7 +139,7 @@ def accept_result(state, result):
     elif result["findings"] or result["blockers"]:
         decision = {"action": "assess_findings", "frame_id": frame["frame_id"], "parent_frame_id": parent_id}
     elif parent_id is not None:
-        if children_resolved(frames[parent_id], list(frames.values())):
+        if children_resolved(frames[parent_id], list(frames.values()), updated):
             decision = {"action": "resume_parent", "frame_id": parent_id}
         else:
             decision = {"action": "collect_children", "frame_id": parent_id}

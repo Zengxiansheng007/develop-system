@@ -295,11 +295,11 @@ class RunMigrationTests(unittest.TestCase):
         self.assertEqual(state['next_decision'], self.state['next_decision'])
         self.assertEqual(ready_steps(state), [])
 
-    def test_inflight_and_continuing_legacy_evidence_require_later_compatibility(self):
+    def test_inflight_and_continuing_legacy_evidence_require_explicit_compatibility(self):
         self.state = self.old('dispatch', '--revision', str(self.state['revision']), '--step-id', 'a',
             '--skill-id', 'codebase-design', '--input-version', 'synthetic-inflight')
         before = self.store.path.read_bytes()
-        with self.assertRaisesRegex(ValueError, '#11'):
+        with self.assertRaisesRegex(ValueError, 'explicit compatibility inventory'):
             self.store.apply_migration(self.preview())
         self.assertEqual(self.store.path.read_bytes(), before)
 
@@ -308,7 +308,7 @@ class RunMigrationTests(unittest.TestCase):
         self.assertEqual(self.state['status'], 'running')
         self.assertTrue(all(f['status'] == 'completed' for f in self.state['frames']))
         before = self.store.path.read_bytes()
-        with self.assertRaisesRegex(ValueError, '#11'):
+        with self.assertRaisesRegex(ValueError, 'explicit compatibility inventory'):
             self.store.apply_migration(self.preview())
         self.assertEqual(self.store.path.read_bytes(), before)
 

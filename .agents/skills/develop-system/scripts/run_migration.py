@@ -25,7 +25,8 @@ def bound_file(reference):
 
 
 def bind_adoption(preview, adoption):
-    if not isinstance(adoption, dict) or set(adoption) != {'authorization', 'historical'}:
+    if not isinstance(adoption, dict) or set(adoption) not in (
+            {'authorization', 'historical'}, {'authorization', 'historical', 'compatibility'}):
         raise ValueError('Explicit adoption authorization and original-version evidence required')
     result = copy.deepcopy(adoption)
     authorization = result['authorization']
@@ -52,6 +53,9 @@ def bind_adoption(preview, adoption):
         required.extend(frame.get('resources', []))
     if any(bound_file(item) not in historical['files'] for item in required):
         raise ValueError('Historical manifest omits recorded engine/Skill/resource/registry versions')
+    if 'compatibility' in result:
+        from legacy_compat import bind
+        result['compatibility'] = bind(preview, result['compatibility'])
     return result
 
 
@@ -93,9 +97,9 @@ def apply(store, preview):
         state = store.read()
         if {'control', 'restrictions', 'selected_skills', 'migration'} & state.keys():
             raise ValueError('Existing legacy extensions need explicit mapping; conversion cannot overwrite them')
-        if any(f['status'] == 'running' for f in state['frames']) or (
-                state['frames'] and state['status'] not in {'completed', 'cancelled'}):
-            raise ValueError('Legacy in-flight or continuing frame/evidence compatibility requires #11; original state preserved')
+        if 'compatibility' not in preview['adoption'] and (any(f['status'] == 'running' for f in state['frames']) or (
+                state['frames'] and state['status'] not in {'completed', 'cancelled'})):
+            raise ValueError('Legacy continuing frames require explicit compatibility inventory; original state preserved')
         from workflow_state import load_registry, validate_plan, validate_control
         registry, registry_path, registry_sha = load_registry(preview['target']['registry']['path'])
         validate_plan(state['plan'], registry)
@@ -120,6 +124,9 @@ def apply(store, preview):
         changed['migration'] = {'id': identity, 'source': preview['source'], 'target': preview['target'],
             'authorization': preview['adoption']['authorization'], 'historical': preview['adoption']['historical'],
             'original_registry': copy.deepcopy(state['registry'])}
+        if 'compatibility' in preview['adoption']:
+            from legacy_compat import inventory
+            changed['migration']['compatibility'] = inventory(preview)
         raw = encode(changed)
         recovery = {'format': 'develop-system-recovery-v1', 'id': identity,
             'source': preview['source'], 'target': preview['target'], 'original_state': old,

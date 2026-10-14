@@ -1,6 +1,6 @@
-# 旧运行的迁移预览、采用与恢复（T08–T09）
+# 旧运行的迁移预览、采用与恢复（T08–T10）
 
-需要判断 v3 运行如何采用候选版本时，先生成只读预览，核对绑定与待核验清单。#10 提供明确采用与恢复；旧帧继续执行和旧证据资格仍由 #11 交付。真实运行采用需要单独的实际授权。
+需要判断 v3 运行如何采用候选版本时，先生成只读预览，核对绑定与待核验清单。#10 提供明确采用与恢复；#11 的[旧帧与历史证据兼容](legacy-compatibility.md)承接在途及历史核验。真实运行采用需要单独的实际授权。
 
 1. 选择实际候选的 `scripts/workflow_state.py`。调用 `RunStore(project, run_id).preview_migration(target_registry=...)`，或 CLI `preview-migration --entry develop-system --project-root <原项目> --run-id <原身份> [--registry <目标登记表>]`。默认目标登记表属于所加载候选。完成条件是返回源绑定与目标清单，不能以同名全局 Skill 替代。
 2. 核对 `source` 的实际路径、run、revision、原始字节 SHA-256 和原契约版本；`target` 固定目标 state/registry/result/check 版本及实际文件清单/hash。原状态读取前后变化则拒绝。预览不创建锁、目录、帧或事件，也不修改原状态。
@@ -45,7 +45,7 @@
 ```
 
 2. 审阅新的完整预览，调用 `apply_migration(preview)`。CLI 为 `preview-migration --adoption <上述 JSON>`，随后 `apply-migration --revision <原 revision> --payload <完整预览 JSON>`。每个已记录的帧 `engine_binding` 都须按原路径/hash 核对当前可用性并列入 historical.files；运行级引擎不能替代不同路径的帧级绑定。缺失、原 hash 不符或清单遗漏均在提交前拒绝；不从未记录信息推断历史依赖。缺授权、原依据不匹配、源 revision/字节或精确目标变化时，保留原状态并停止；重新核对后生成新的明确预览。
-3. 当前中间候选支持无旧帧的运行，以及无 running 帧、仅保留历史的 completed/cancelled 终态。非终态已有旧帧需要继续判定其协议、义务或证据资格；这些情形与全部在途旧帧均在写入前拒绝，等待 #11。旧快照若已有 control/restrictions/selected_skills/migration 同名扩展，先明确原含义与映射；工具拒绝覆盖。不得填空义务、删除帧或抹去检查来绕过。终态历史帧/事件/接受状态原样保存，不因此获得新版完成资格。
+3. 无旧帧的运行，以及仅保留历史且无 running 帧的 completed/cancelled 终态可按基本采用路径处理。继续处理旧帧时，还须明确提供[兼容清单](legacy-compatibility.md#显式旧契约清单)，保存实际旧契约并核验当前资格；清单中的有效在途帧不被重派或重启，未声明兼容的继续执行请求仍拒绝。旧快照若已有 control/restrictions/selected_skills/migration 同名扩展，先明确原含义与映射；工具拒绝覆盖。不得填空义务、删除帧或抹去检查来绕过。终态历史帧/事件/接受状态原样保存，不因此获得新版完成资格。
 4. 调用持既有运行锁完成复核、原字节和版本保存、暂存验证及原子替换；这段切换窗口阻止新派发，不修改用户暂停。局部限制保留所属工作，未知限制保持保守停止，原暂停和终态继续有效。run/项目/票/计划/帧/AC/事件、授权、未决扩展字段和额度保留，unknown 不补零；原 registry 快照与恢复材料继续可查。
 5. 成功返回 state、recovery 与 receipt（恢复清单 path/hash）。核对权威 state 与返回结果；恢复目录只有非运行格式清单和 `.bin` 原字节，不是另一个可续跑 state.json。提交前失败保持原权威字节；可能留下不可执行的准备材料。若错误明确表示已经提交但复读异常，先核对权威文件和清单，不自动重试或覆盖恢复。
 

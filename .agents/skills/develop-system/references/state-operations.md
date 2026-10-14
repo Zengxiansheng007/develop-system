@@ -42,7 +42,7 @@ return --payload <结果文件> 的结构见 [统一执行协议](codex-runtime.
 - 已失效或中断旧帧由明确重新分派替代受影响后代，旧结果不能覆盖新帧。
 - 环境健康由对应专业技能实际验证；哈希一致不证明服务存活。
 - 同技能/输入/阻塞两次无进展停止重试；用户明确暂停/取消时 pause/cancel --reason，完成或取消 run 不恢复。
-- 当前 T01–T09 候选创建 state v4、registry v3；新帧及回流必须携带 protocol_version: 1。必需助手与明确登记见[扩展接口](extensions.md)，工作树检查资格见[机器检查记录](check-records.md)。state v3 或 registry v2 旧快照显式采用前可读取但不能续写，缺义务字段不能当作空义务。需要评估、明确采用或恢复旧运行时，使用[迁移协议](migration-preview.md)中的 preview-migration / apply-migration / rollback-migration；旧帧继续执行与旧证据复用仍由 #11 交付。
+- 当前 T01–T10 候选创建 state v4、registry v3；新帧及回流必须携带 protocol_version: 1。必需助手与明确登记见[扩展接口](extensions.md)，工作树检查资格见[机器检查记录](check-records.md)。state v3 或 registry v2 旧快照显式采用前可读取但不能续写，缺义务字段不能当作空义务。需要评估、明确采用或恢复旧运行时，使用[迁移协议](migration-preview.md)中的 preview-migration / apply-migration / rollback-migration；清单内旧帧的原回传使用 return 留存，已回流专业结论使用[qualify-legacy](legacy-compatibility.md#专业核验)追加核验。暂停时只保存，不应用核验或关闭验收。
 
 局部限制、就绪与完成的含义见[作用范围](scoped-state.md)。
 

@@ -113,6 +113,10 @@ def validate_frame_check(state, frame, check, record, visiting=()):
         raise ValueError("Claimed check status contradicts recorded execution")
     if "command" in check and check["command"] != record["command"]:
         raise ValueError("Claimed check command contradicts recorded execution")
+    from legacy_compat import original_frame, validate_check
+    if original_frame(state, frame):
+        validate_check(state, frame, check, record, visiting)
+        return
     reference = check.get("reference")
     if reference is None:
         validate_managed(record, frame.get("worktree_binding"))
@@ -138,6 +142,16 @@ def frame_is_current(state, frame, visiting=()):
     if frame["frame_id"] in visiting or not all(evidence_is_current(e) for e in frame_evidence(frame)):
         return False
     try:
+        from legacy_compat import original_frame, current_qualification
+        legacy = original_frame(state, frame)
+        if legacy:
+            qualifications = state['migration']['compatibility']['qualifications']
+            if any(q['frame_id'] == frame['frame_id'] and q['status'] == 'qualified' for q in qualifications):
+                if not current_qualification(state, frame, visiting):
+                    return False
+            else:
+                # Retained historical bytes are current facts, not current completion qualification.
+                return True
         if frame.get("worktree_binding") and not frame.get("checks"):
             validate_worktree(frame["worktree_binding"])
         for check in frame.get("checks", []):
@@ -245,6 +259,9 @@ def active_root_work(state):
     """Waiting parents are not workers; an active independent child still consumes capacity."""
     relevant = [f for f in state["frames"] if f["status"] != "superseded"]
     stopped = {r.get("frame_id") for r in state["restrictions"]}
+    # A retained return means that worker has stopped, even while qualification is pending.
+    stopped.update(r['payload']['frame_id'] for r in state.get('migration', {}).get('compatibility', {}).get('receipts', [])
+                   if r['status'] == 'pending')
     return {root_step_id(state, f["frame_id"]) for f in relevant
             if f["status"] == "running" and f["frame_id"] not in stopped
             and not any(c.get("parent_frame_id") == f["frame_id"] and not frame_resolved(c) for c in relevant)}
@@ -266,7 +283,8 @@ def ready_steps(state):
         owned = {f["frame_id"] for f in relevant if f.get("step_id") == step["step_id"]}
         owned = descendant_frame_ids(relevant, owned)
         return step["status"] in {"completed", "waived"} and all(
-            frame_resolved(f) or (f["status"] == "completed" and f.get("needs_assessment") and f["frame_id"] in resolving)
+            (frame_resolved(f) and children_resolved(f, relevant, state)) or
+            (f["status"] == "completed" and f.get("needs_assessment") and f["frame_id"] in resolving)
             for f in relevant if f["frame_id"] in owned)
     def dependencies_ready(step):
         done = [s for s in state["plan"] if step_complete(s, step.get("resolves_frames", []))]
@@ -626,7 +644,8 @@ class RunStore:
             old = self.read()
             if old["schema_version"] != 4 or old['registry'].get('schema_version') != 3:
                 raise ValueError("Legacy state is read-only until explicit migration")
-            if any(not isinstance(f.get('completion_obligations'), list) for f in old['frames']):
+            from legacy_compat import original_frame
+            if any(not isinstance(f.get('completion_obligations'), list) and not original_frame(old, f) for f in old['frames']):
                 raise ValueError('Missing completion obligations require explicit migration')
             if old["revision"] != expected_revision:
                 raise ValueError("Revision conflict; reread state before retrying")
@@ -746,7 +765,7 @@ class RunStore:
         for helper in descriptor["required_calls"]:
             source = selection[helper]
             obligations.append({"skill_id": helper, "skill_path": source["skill_path"], "skill_sha256": source["sha256"]})
-        if parent_frame_id and any(duty["skill_id"] == skill_id for duty in parent["completion_obligations"]):
+        if parent_frame_id and any(duty["skill_id"] == skill_id for duty in parent.get("completion_obligations", [])):
             required = True
         prerequisites = (step if step_id is not None else parent).get("shared_preconditions", [])
         if selected["skill_path"]:
@@ -771,117 +790,134 @@ class RunStore:
         return state
 
     def receive(self, revision, result):
-        def change(state):
-            require_current(state)
-            item = copy.deepcopy(result)
-            if item.get("mode") != "skill" or item.get("execution") not in {"sequential", "delegated"}:
-                raise ValueError("Return must identify actual loading and execution modes")
-            selected_frame = next((f for f in state["frames"] if f["frame_id"] == item.get("frame_id")), None)
-            if selected_frame is None or item["mode"] != selected_frame["mode"]:
-                raise ValueError("Return mode does not match dispatched frame")
-            if selected_frame.get("completion_invalidated_by") and selected_frame.get("needs_assessment"):
-                raise ValueError("Prior parent findings require professional assessment before requalification")
-            if item.get("block_scope", "local") not in {"local", "unknown"}:
-                raise ValueError("Block scope must be local or explicitly unknown")
-            if item["status"] == "completed" and any(
-                    r.get("frame_id") == selected_frame["frame_id"] or
-                    (selected_frame.get("step_id") is not None and r.get("step_id") == selected_frame["step_id"])
-                    for r in state["restrictions"]):
-                raise ValueError("Necessary scoped restrictions remain unresolved")
-            if item["status"] == "skipped" and (selected_frame["required"] or not item.get("skip_reason")):
-                raise ValueError("Only optional frames with a reason can be skipped")
-            item["artifacts"] = [file_evidence(a) for a in item["artifacts"]]
-            if not isinstance(item.get("checks"), list):
-                raise ValueError("checks must be an array")
-            for check in item["checks"]:
-                if not isinstance(check, dict) or "record" not in check:
-                    raise ValueError("Command checks require a machine-generated record")
-                check["record"] = file_evidence(check["record"])
-                recorded = json.loads(Path(check["record"]["path"]).read_text(encoding="utf-8"))
-                validate_frame_check(state, selected_frame, check, recorded)
+        return self.mutate(revision, lambda state: self._receive_state(state, result))
 
-            if item.get('skill_id') == 'grill-with-docs' and item.get('status') == 'completed':
-                delivery = item.get('grill_delivery')
-                if not isinstance(delivery, dict) or any(delivery.get(k) is not True
-                    for k in ('confirmed','core_questions_resolved','helpers_resolved')):
-                    raise ValueError('Grill completion needs current document confirmation and resolved questions/helpers')
-                if any(not isinstance(delivery.get(k), str) or not delivery[k].strip()
-                       for k in ('version','confirmation_reference')) or not isinstance(delivery.get('checklist'), list) or not delivery['checklist']:
-                    raise ValueError('Grill completion needs version, real confirmation reference and delivery checklist')
-                document = file_evidence(delivery['document'])
-                if not any(a['path'] == document['path'] and a['sha256'] == document['sha256'] for a in item['artifacts']):
-                    raise ValueError('Confirmed document must be a returned artifact')
-                item['grill_delivery']['document'] = document
-            if item["status"] == "completed" and not item["artifacts"] and not item["checks"]:
-                raise ValueError("Completed return needs actual artifacts or checks")
-            validate_system_conclusions(state, item)
-            acceptance = item.get("acceptance_checks", [])
-            resolutions = item.get("resolved_findings", [])
-            if not isinstance(acceptance, list) or not isinstance(resolutions, list) or any(not isinstance(v, str) for v in resolutions):
-                raise ValueError("Specialist conclusions must be arrays")
-            if resolutions and item["status"] != "completed":
-                raise ValueError("Only completed specialist work can resolve findings")
-            current_findings = {f["frame_id"] for f in state["frames"] if f["status"] != "superseded" and f.get("needs_assessment")}
-            if not set(resolutions) <= current_findings:
-                # Repeated events may reference already resolved findings; compare their original event first.
-                original = next((e for e in state["events"] if e["event_id"] == item["event_id"]), None)
-                if original is None or original.get("resolved_findings", []) != resolutions:
-                    raise ValueError("Resolution must name current unresolved frames")
-            known_criteria = {c["id"]: c for c in state["acceptance"]}
-            ids = set()
-            for check in acceptance:
-                if not isinstance(check, dict) or check.get("id") not in known_criteria or check["id"] in ids:
-                    raise ValueError("Unknown or duplicate acceptance criterion")
-                ids.add(check["id"])
-                if check.get("kind") not in {"technical", "human"} or check.get("status") not in {"passed", "failed", "pending"}:
-                    raise ValueError("Acceptance must identify kind and status")
-                criterion = known_criteria[check["id"]]
-                if check["kind"] != criterion["kind"] or (criterion["allowed_skill_ids"] and item["skill_id"] not in criterion["allowed_skill_ids"]):
-                    raise ValueError("Acceptance must match the assigned kind and specialist owners")
-                check["evidence"] = [file_evidence(e) for e in check.get("evidence", [])]
-                if check["status"] == "passed":
-                    if any(c["status"] != "passed" for c in item["checks"]):
-                        raise ValueError("Failed command checks cannot support passed acceptance")
-                    if item["status"] != "completed" or check.get("completion_checked") is not True or not check["evidence"]:
-                        raise ValueError("Passed acceptance needs a completed specialist and evidence")
-                    if check["kind"] == "human" and (check.get("human_confirmed") is not True or not isinstance(check.get("user_reference"), str) or not check["user_reference"].strip()):
-                        raise ValueError("Human acceptance requires an actual user confirmation reference")
-            updated, decision = accept_result(state, item)
-            if decision["action"] == "duplicate":
+    def qualify_legacy(self, revision, frame_id, source_frame_id):
+        def change(state):
+            from legacy_compat import qualify
+            result = qualify(state, frame_id, source_frame_id)
+            if result is None:
                 return state
-            frame = next(f for f in updated["frames"] if f["frame_id"] == item["frame_id"])
-            frame["artifacts"] = item["artifacts"]
-            frame["checks"] = item["checks"]
-            frame["acceptance_checks"] = acceptance
-            frame["resolved_findings"] = resolutions
-            frame["block_scope"] = item.get("block_scope", "local")
-            if item["status"] == "completed":
-                frame.pop("completion_invalidated_by", None)
-            if item["status"] == "skipped":
-                frame["skip_reason"] = item["skip_reason"]
-            if frame.get("step_id"):
-                step = next(s for s in updated["plan"] if s["step_id"] == frame["step_id"])
-                step["status"] = item["status"]
-            # A specialist's local outcome does not change user run control.
-            if item["status"] in {"failed", "blocked"}:
-                def signature(event):
-                    owner = next(f for f in updated["frames"] if f["frame_id"] == event["frame_id"])
-                    return (owner.get("step_id"), owner.get("parent_frame_id"), event["skill_id"],
-                            event.get("input_version"), event["status"], event["blockers"], event["artifacts"], event["checks"])
-                current_signature = signature(item)
-                matching = [e for e in updated["events"] if signature(e) == current_signature]
-                if len(matching) >= 2:
-                    restriction = {"kind": "no_progress", "step_id": root_step_id(updated, frame["frame_id"]),
-                                   "frame_id": frame["frame_id"], "signature": list(current_signature)}
-                    if restriction not in updated["restrictions"]:
-                        updated["restrictions"].append(restriction)
-                    if updated["control"]["status"] == "running":
-                        updated["next_decision"] = {"action": "stop_repeated_no_progress", "signature": list(current_signature),
-                                                    "frame_id": frame["frame_id"], "scope": "local"}
-            apply_system_conclusions(updated, item)
-            explain_system_restrictions(updated)
-            return updated
+            return self._receive_state(state, result, qualified_legacy=True)
         return self.mutate(revision, change)
+
+    def _receive_state(self, state, result, qualified_legacy=False):
+        from legacy_compat import original_frame, receive as receive_legacy
+        target = next((f for f in state['frames'] if f['frame_id'] == result.get('frame_id')), None)
+        if target and original_frame(state, target) and not qualified_legacy:
+            return receive_legacy(state, result)
+        if not qualified_legacy and any(r['payload']['event_id'] == result.get('event_id')
+                for r in state.get('migration', {}).get('compatibility', {}).get('receipts', [])):
+            raise ValueError('Event identity already belongs to a retained legacy result')
+        require_current(state)
+        item = copy.deepcopy(result)
+        if item.get("mode") != "skill" or item.get("execution") not in {"sequential", "delegated"}:
+            raise ValueError("Return must identify actual loading and execution modes")
+        selected_frame = next((f for f in state["frames"] if f["frame_id"] == item.get("frame_id")), None)
+        if selected_frame is None or item["mode"] != selected_frame["mode"]:
+            raise ValueError("Return mode does not match dispatched frame")
+        if selected_frame.get("completion_invalidated_by") and selected_frame.get("needs_assessment"):
+            raise ValueError("Prior parent findings require professional assessment before requalification")
+        if item.get("block_scope", "local") not in {"local", "unknown"}:
+            raise ValueError("Block scope must be local or explicitly unknown")
+        if item["status"] == "completed" and any(
+                r.get("frame_id") == selected_frame["frame_id"] or
+                (selected_frame.get("step_id") is not None and r.get("step_id") == selected_frame["step_id"])
+                for r in state["restrictions"]):
+            raise ValueError("Necessary scoped restrictions remain unresolved")
+        if item["status"] == "skipped" and (selected_frame["required"] or not item.get("skip_reason")):
+            raise ValueError("Only optional frames with a reason can be skipped")
+        item["artifacts"] = [file_evidence(a) for a in item["artifacts"]]
+        if not isinstance(item.get("checks"), list):
+            raise ValueError("checks must be an array")
+        for check in item["checks"]:
+            if not isinstance(check, dict) or "record" not in check:
+                raise ValueError("Command checks require a machine-generated record")
+            check["record"] = file_evidence(check["record"])
+            recorded = json.loads(Path(check["record"]["path"]).read_text(encoding="utf-8"))
+            validate_frame_check(state, selected_frame, check, recorded)
+
+        if item.get('skill_id') == 'grill-with-docs' and item.get('status') == 'completed':
+            delivery = item.get('grill_delivery')
+            if not isinstance(delivery, dict) or any(delivery.get(k) is not True
+                for k in ('confirmed','core_questions_resolved','helpers_resolved')):
+                raise ValueError('Grill completion needs current document confirmation and resolved questions/helpers')
+            if any(not isinstance(delivery.get(k), str) or not delivery[k].strip()
+                   for k in ('version','confirmation_reference')) or not isinstance(delivery.get('checklist'), list) or not delivery['checklist']:
+                raise ValueError('Grill completion needs version, real confirmation reference and delivery checklist')
+            document = file_evidence(delivery['document'])
+            if not any(a['path'] == document['path'] and a['sha256'] == document['sha256'] for a in item['artifacts']):
+                raise ValueError('Confirmed document must be a returned artifact')
+            item['grill_delivery']['document'] = document
+        if item["status"] == "completed" and not item["artifacts"] and not item["checks"]:
+            raise ValueError("Completed return needs actual artifacts or checks")
+        validate_system_conclusions(state, item)
+        acceptance = item.get("acceptance_checks", [])
+        resolutions = item.get("resolved_findings", [])
+        if not isinstance(acceptance, list) or not isinstance(resolutions, list) or any(not isinstance(v, str) for v in resolutions):
+            raise ValueError("Specialist conclusions must be arrays")
+        if resolutions and item["status"] != "completed":
+            raise ValueError("Only completed specialist work can resolve findings")
+        current_findings = {f["frame_id"] for f in state["frames"] if f["status"] != "superseded" and f.get("needs_assessment")}
+        if not set(resolutions) <= current_findings:
+            # Repeated events may reference already resolved findings; compare their original event first.
+            original = next((e for e in state["events"] if e["event_id"] == item["event_id"]), None)
+            if original is None or original.get("resolved_findings", []) != resolutions:
+                raise ValueError("Resolution must name current unresolved frames")
+        known_criteria = {c["id"]: c for c in state["acceptance"]}
+        ids = set()
+        for check in acceptance:
+            if not isinstance(check, dict) or check.get("id") not in known_criteria or check["id"] in ids:
+                raise ValueError("Unknown or duplicate acceptance criterion")
+            ids.add(check["id"])
+            if check.get("kind") not in {"technical", "human"} or check.get("status") not in {"passed", "failed", "pending"}:
+                raise ValueError("Acceptance must identify kind and status")
+            criterion = known_criteria[check["id"]]
+            if check["kind"] != criterion["kind"] or (criterion["allowed_skill_ids"] and item["skill_id"] not in criterion["allowed_skill_ids"]):
+                raise ValueError("Acceptance must match the assigned kind and specialist owners")
+            check["evidence"] = [file_evidence(e) for e in check.get("evidence", [])]
+            if check["status"] == "passed":
+                if any(c["status"] != "passed" for c in item["checks"]):
+                    raise ValueError("Failed command checks cannot support passed acceptance")
+                if item["status"] != "completed" or check.get("completion_checked") is not True or not check["evidence"]:
+                    raise ValueError("Passed acceptance needs a completed specialist and evidence")
+                if check["kind"] == "human" and (check.get("human_confirmed") is not True or not isinstance(check.get("user_reference"), str) or not check["user_reference"].strip()):
+                    raise ValueError("Human acceptance requires an actual user confirmation reference")
+        updated, decision = accept_result(state, item)
+        if decision["action"] == "duplicate":
+            return state
+        frame = next(f for f in updated["frames"] if f["frame_id"] == item["frame_id"])
+        frame["artifacts"] = item["artifacts"]
+        frame["checks"] = item["checks"]
+        frame["acceptance_checks"] = acceptance
+        frame["resolved_findings"] = resolutions
+        frame["block_scope"] = item.get("block_scope", "local")
+        if item["status"] == "completed":
+            frame.pop("completion_invalidated_by", None)
+        if item["status"] == "skipped":
+            frame["skip_reason"] = item["skip_reason"]
+        if frame.get("step_id"):
+            step = next(s for s in updated["plan"] if s["step_id"] == frame["step_id"])
+            step["status"] = item["status"]
+        # A specialist's local outcome does not change user run control.
+        if item["status"] in {"failed", "blocked"}:
+            def signature(event):
+                owner = next(f for f in updated["frames"] if f["frame_id"] == event["frame_id"])
+                return (owner.get("step_id"), owner.get("parent_frame_id"), event["skill_id"],
+                        event.get("input_version"), event["status"], event["blockers"], event["artifacts"], event["checks"])
+            current_signature = signature(item)
+            matching = [e for e in updated["events"] if signature(e) == current_signature]
+            if len(matching) >= 2:
+                restriction = {"kind": "no_progress", "step_id": root_step_id(updated, frame["frame_id"]),
+                               "frame_id": frame["frame_id"], "signature": list(current_signature)}
+                if restriction not in updated["restrictions"]:
+                    updated["restrictions"].append(restriction)
+                if updated["control"]["status"] == "running":
+                    updated["next_decision"] = {"action": "stop_repeated_no_progress", "signature": list(current_signature),
+                                                "frame_id": frame["frame_id"], "scope": "local"}
+        apply_system_conclusions(updated, item)
+        explain_system_restrictions(updated)
+        return updated
 
     def attach_grill(self, revision, context, inputs=(), skill_path=None):
         """Register/reuse an interview within one locked revision; never init or guess a parent."""
@@ -1143,7 +1179,7 @@ class RunStore:
             relevant = [f for f in state["frames"] if f["status"] != "superseded"]
             if any(not frame_resolved(f) for f in relevant):
                 raise ValueError("Unresolved skill work or findings remain")
-            if any(not children_resolved(f, relevant) for f in relevant):
+            if any(not children_resolved(f, relevant, state) for f in relevant):
                 raise ValueError('Mandatory helper obligations remain unresolved')
             if any(not frame_is_current(state, f) for f in relevant):
                 raise ValueError("Revalidate changed artifacts before completion")
@@ -1175,7 +1211,7 @@ class RunStore:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["init", "show", "next", "preview-migration", "apply-migration", "rollback-migration", "inspect-grill", "attach-grill", "route-grill", "dispatch", "block", "return", "register", "extend-plan", "assess", "resume", "complete", "pause", "cancel"])
+    parser.add_argument("command", choices=["init", "show", "next", "preview-migration", "apply-migration", "rollback-migration", "qualify-legacy", "inspect-grill", "attach-grill", "route-grill", "dispatch", "block", "return", "register", "extend-plan", "assess", "resume", "complete", "pause", "cancel"])
     parser.add_argument("--entry", required=True, choices=["develop-system", "ask-matt"])
     parser.add_argument("--project-root", required=True)
     parser.add_argument("--run-id", required=True)
@@ -1228,6 +1264,7 @@ def main():
                     raise ValueError('Adoption revision must match the reviewed preview')
                 value = store.apply_migration(preview)
             elif args.command == "rollback-migration":value = store.rollback_migration(args.revision, read(args.payload))
+            elif args.command == "qualify-legacy":value = store.qualify_legacy(args.revision, args.frame_id, args.source_frame_id)
             elif args.command == "dispatch":
                 value = store.dispatch(args.revision,args.skill_id,args.input_version,args.step_id,args.parent_frame_id,args.input,args.skill_path,args.require_original,not args.optional,
                     worktree=read(args.worktree) if args.worktree else None)
