@@ -46,10 +46,12 @@ def bind_adoption(preview, adoption):
         if bound_file(original['engine_binding']) != historical['engine']:
             raise ValueError('Historical engine disagrees with the original recorded engine')
     for frame in original['frames']:
+        if 'engine_binding' in frame:
+            required.append(frame['engine_binding'])
         required.append({'path': frame['skill_path'], 'sha256': frame['skill_sha256']})
         required.extend(frame.get('resources', []))
     if any(bound_file(item) not in historical['files'] for item in required):
-        raise ValueError('Historical manifest omits recorded Skill/resource/registry versions')
+        raise ValueError('Historical manifest omits recorded engine/Skill/resource/registry versions')
     return result
 
 

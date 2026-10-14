@@ -94,6 +94,86 @@ class RunMigrationTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.state = json.loads(result.stdout)
 
+    def test_missing_recorded_frame_engine_refuses_adoption_without_changing_source(self):
+        self.finish_legacy()
+        frames = copy.deepcopy(self.state['frames'])
+        frames[-1]['engine_binding'] = {
+            'path': str(self.project / 'missing-original-frame-engine.py'),
+            'sha256': file_evidence(str(self.legacy / 'scripts/workflow_state.py'))['sha256']}
+        self.old_fields({'frames': frames})
+        before = self.store.path.read_bytes()
+        plain = self.store.preview_migration()
+        self.assertTrue(any(item['kind'] == 'historical_engine' and
+            item['owner'] == frames[-1]['frame_id'] and item['reason'] == 'unavailable'
+            for item in plain['pending']))
+        self.assertEqual(self.store.path.read_bytes(), before)
+        with self.assertRaises(ValueError):
+            self.store.apply_migration(self.preview())
+        self.assertEqual(self.store.path.read_bytes(), before)
+
+    def test_recorded_frame_engine_requires_its_original_hash_and_manifest_entry(self):
+        self.finish_legacy()
+        engine = self.project / 'synthetic-recorded-frame-engine.py'
+        original = (self.legacy / 'scripts/workflow_state.py').read_bytes()
+        engine.write_bytes(original)
+        recorded = file_evidence(str(engine))
+        frames = copy.deepcopy(self.state['frames'])
+        frames[-1]['engine_binding'] = recorded
+        self.old_fields({'frames': frames})
+        before = self.store.path.read_bytes()
+        # Available bytes at another path are not a substitute for this recorded version.
+        with self.assertRaises(ValueError):
+            self.store.apply_migration(self.preview())
+        self.assertEqual(self.store.path.read_bytes(), before)
+        engine.write_bytes(original + b'\n# synthetic changed version\n')
+        self.original_files.append(file_evidence(str(engine)))
+        with self.assertRaises(ValueError):
+            self.store.apply_migration(self.preview())
+        self.assertEqual(self.store.path.read_bytes(), before)
+        engine.write_bytes(original)
+        self.original_files[-1] = recorded
+        preview = self.preview()
+        # Revalidate inside apply even after a valid reviewed preview.
+        engine.unlink()
+        with self.assertRaises(ValueError):
+            self.store.apply_migration(preview)
+        self.assertEqual(self.store.path.read_bytes(), before)
+
+    def test_every_recorded_frame_engine_is_saved_and_required_for_restoration(self):
+        self.finish_legacy()
+        frames = copy.deepcopy(self.state['frames'])
+        versions = []
+        for index, frame in enumerate(frames):
+            engine = self.project / ('synthetic-frame-engine-' + str(index) + '.py')
+            raw = (self.legacy / 'scripts/workflow_state.py').read_bytes()
+            engine.write_bytes(raw)
+            reference = file_evidence(str(engine))
+            frame['engine_binding'] = reference
+            self.original_files.append(reference)
+            versions.append((engine, raw, reference))
+        self.old_fields({'frames': frames})
+        before = self.store.path.read_bytes()
+        applied = self.store.apply_migration(self.preview())
+        self.assertEqual(applied['state']['frames'], frames)
+        adopted = self.store.path.read_bytes()
+        for engine, raw, reference in versions:
+            saved = next(item['saved'] for item in applied['recovery']['versions']
+                if item['original'] == reference)
+            self.assertEqual(Path(saved['path']).read_bytes(), raw)
+            for damage in ('changed', 'missing'):
+                with self.subTest(frame_engine=engine.name, damage=damage):
+                    if damage == 'changed':
+                        engine.write_bytes(raw + b'\n# synthetic change\n')
+                    else:
+                        engine.unlink()
+                    with self.assertRaises(ValueError):
+                        self.store.rollback_migration(applied['state']['revision'], applied['receipt'])
+                    self.assertEqual(self.store.path.read_bytes(), adopted)
+                    engine.write_bytes(raw)
+        self.store.rollback_migration(applied['state']['revision'], applied['receipt'])
+        self.assertEqual(self.store.path.read_bytes(), before)
+        self.assertEqual(self.old('show')['frames'], frames)
+
     def test_unsupported_control_shape_cannot_be_committed_before_validation(self):
         self.old_fields({'status': 'synthetic-unrecognized-control'})
         preview = self.preview()
