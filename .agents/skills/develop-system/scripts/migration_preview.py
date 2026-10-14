@@ -172,14 +172,27 @@ def restriction_mapping(state, pending):
             restrictions.append({'kind': 'missing_skill', 'scope': 'local', 'step_id': step,
                                  'frame_id': decision.get('parent_frame_id'), 'basis': copy.deepcopy(decision)})
     for frame in frames.values():
-        if frame.get('status') not in {'blocked', 'waiting_user', 'cancelled'} and not frame.get('findings'):
+        if frame.get('status') == 'superseded':
+            continue
+        event = next((e for e in reversed(state.get('events', []))
+                      if e.get('run_id') == state['run_id']
+                      and all(e.get(key) == frame.get(key)
+                              for key in ('frame_id', 'parent_frame_id', 'skill_id', 'input_version'))), None)
+        # v3 stores unresolved facts in the event and the current assessment flag in the frame.
+        # A later assess clears that flag without rewriting the historical finding.
+        facts = any(source.get('findings') or source.get('blockers') for source in (frame, event or {}))
+        unresolved = frame.get('needs_assessment', facts)
+        if frame.get('status') not in {'blocked', 'waiting_user', 'cancelled'} and not unresolved:
             continue
         step = owner(frame['frame_id'])
-        scope = frame.get('block_scope', 'unknown') if step else 'unknown'
-        if scope not in {'local', 'global'}:
-            scope = 'unknown'
+        scopes = {source['block_scope'] for source in (frame, event or {}) if source.get('block_scope')}
+        scope = next(iter(scopes)) if step and len(scopes) == 1 and scopes <= {'local', 'global'} else 'unknown'
         restrictions.append({'kind': 'frame_result', 'scope': scope, 'step_id': step,
-                             'frame_id': frame['frame_id'], 'basis': copy.deepcopy(frame)})
+                             'frame_id': frame['frame_id'], 'basis': copy.deepcopy(frame),
+                             'event_basis': copy.deepcopy(event)})
+        if unresolved and event is None:
+            pending.append({'kind': 'restriction_basis', 'owner': frame['frame_id'],
+                            'reason': 'Unresolved frame retained; matching original result event unavailable'})
     # A local result does not explain an otherwise untraceable whole-run stop.
     if status == 'blocked' and decision.get('action') != 'missing_skill':
         restrictions.append({'kind': 'historical_hold', 'scope': 'unknown', 'basis': copy.deepcopy(decision)})

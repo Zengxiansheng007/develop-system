@@ -241,5 +241,129 @@ class MigrationPreviewTests(unittest.TestCase):
         self.assertEqual(sorted(p.name for p in self.store.root.iterdir()), names)
 
 
+class LegacyRestrictionPreviewTests(unittest.TestCase):
+    """Real archived v3 public commands; all professional conclusions are synthetic."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.project = Path(self.temp.name)
+        self.store = RunStore(self.project, 'legacy-restrictions')
+        legacy = SKILL_ROOT / 'scripts/fixtures/legacy-v3'
+        self.command = [sys.executable, '-X', 'utf8', '-B', str(legacy / 'scripts/workflow_state.py')]
+        registry = json.loads((legacy / 'registry.json').read_text(encoding='utf-8'))
+        for descriptor in registry['skills']:
+            skill = self.project / (descriptor['id'] + '.md')
+            skill.write_text('---\nname: ' + descriptor['id'] +
+                             '\ndescription: Synthetic legacy restriction fixture\n---\n', encoding='utf-8')
+            descriptor['path'] = str(skill)
+        self.artifact = self.project / 'synthetic-conclusion.md'
+        self.artifact.write_text('Synthetic professional result for migration preview only.', encoding='utf-8')
+        self.state = self.old('init', '--goal', 'Synthetic legacy restrictions',
+            '--plan', self.save('plan', [{'step_id': 'design', 'skill_id': 'codebase-design'}]),
+            '--acceptance', self.save('acceptance', ['synthetic AC']),
+            '--registry', self.save('registry', registry))
+        self.state = self.old('dispatch', '--revision', str(self.state['revision']),
+            '--skill-id', 'codebase-design', '--step-id', 'design', '--input-version', 'synthetic-v1')
+
+    def save(self, name, value):
+        path = self.project / (name + '.json')
+        path.write_text(json.dumps(value), encoding='utf-8')
+        return str(path)
+
+    def old(self, action, *args):
+        result = subprocess.run([*self.command, action, '--entry', 'develop-system',
+            '--project-root', str(self.project), '--run-id', self.store.run_id, *args],
+            capture_output=True, text=True, encoding='utf-8', timeout=60)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return json.loads(result.stdout)
+
+    def result(self, status='completed', findings=(), blockers=(), resolved=(), **extra):
+        frame = self.state['frames'][-1]
+        event = {'event_id': 'synthetic-' + str(self.state['revision']),
+            'run_id': self.store.run_id, 'frame_id': frame['frame_id'],
+            'parent_frame_id': frame['parent_frame_id'], 'skill_id': frame['skill_id'],
+            'input_version': frame['input_version'], 'mode': frame['mode'], 'execution': 'sequential',
+            'status': status, 'return_to': 'develop-system', 'completion_checked': True,
+            'artifacts': [str(self.artifact)], 'checks': [], 'findings': list(findings),
+            'blockers': list(blockers), 'acceptance_checks': [], 'resolved_findings': list(resolved), **extra}
+        self.state = self.old('return', '--revision', str(self.state['revision']),
+                              '--payload', self.save('event', event))
+        return self.state['events'][-1]
+
+    def test_genuine_completed_findings_are_pending_restrictions_with_original_event_basis(self):
+        event = self.result(findings=['Synthetic unresolved requirement'])
+        frame = self.state['frames'][0]
+        self.assertTrue(frame['needs_assessment'])
+        self.assertNotIn('findings', frame)
+        before = self.store.path.read_bytes()
+        preview = self.store.preview_migration()
+        restrictions = preview['mapping']['restrictions']
+        self.assertEqual(len(restrictions), 1)
+        self.assertEqual(restrictions[0]['frame_id'], frame['frame_id'])
+        self.assertEqual(restrictions[0]['event_basis'], event)
+        self.assertEqual(restrictions[0]['scope'], 'unknown')
+        self.assertTrue(any(p['kind'] == 'restriction_scope' and p['owner'] == frame['frame_id']
+                            for p in preview['pending']))
+        self.assertEqual(preview['inventory']['snapshot'], self.state)
+        self.assertEqual(self.store.path.read_bytes(), before)
+
+    def resolution(self, target):
+        self.state = self.old('extend-plan', '--revision', str(self.state['revision']),
+            '--payload', self.save('repair-plan', [{'step_id': 'resolve', 'skill_id': 'codebase-design',
+                                                   'resolves_frames': [target]}]),
+            '--reason', 'Synthetic scoped resolution')
+        self.state = self.old('dispatch', '--revision', str(self.state['revision']), '--step-id', 'resolve',
+            '--skill-id', 'codebase-design', '--input-version', 'synthetic-resolution-v1')
+        event = self.result(resolved=[target])
+        return event['frame_id']
+
+    def assess(self, target, source):
+        self.state = self.old('assess', '--revision', str(self.state['revision']), '--frame-id', target,
+            '--source-frame-id', source, '--resolution', 'Synthetic finding assessed',
+            '--evidence', str(self.artifact))
+
+    def test_completed_blocker_uses_original_event_and_explicit_scope(self):
+        event = self.result(blockers=['Synthetic current blocker'], block_scope='local')
+        self.assertNotIn('blockers', self.state['frames'][0])
+        self.assertNotIn('block_scope', self.state['frames'][0])
+        preview = self.store.preview_migration()
+        restriction = preview['mapping']['restrictions'][0]
+        self.assertEqual(restriction['event_basis'], event)
+        self.assertEqual((restriction['scope'], restriction['step_id']), ('local', 'design'))
+        self.assertEqual(preview['inventory']['snapshot']['events'], [event])
+
+    def test_completed_blocker_requires_assess_and_does_not_reappear_after_resolution(self):
+        original = self.result(blockers=['Synthetic unresolved blocker'])
+        target = original['frame_id']
+        source = self.resolution(target)
+        self.assertTrue(any(r.get('frame_id') == target for r in self.store.preview_migration()['mapping']['restrictions']))
+        self.assess(target, source)
+        before = self.store.path.read_bytes()
+        preview = self.store.preview_migration()
+        self.assertFalse(self.state['frames'][0]['needs_assessment'])
+        self.assertEqual(preview['mapping']['restrictions'], [])
+        self.assertIn(original, preview['inventory']['snapshot']['events'])
+        self.assertEqual(self.store.path.read_bytes(), before)
+
+    def test_unresolved_stale_work_is_retained_and_superseded_history_is_not_reactivated(self):
+        original = self.result(status='blocked', findings=['Synthetic finding'], blockers=['Synthetic blocker'])
+        target = original['frame_id']
+        self.state = self.old('resume', '--revision', str(self.state['revision']))
+        self.assertEqual(self.state['frames'][0]['status'], 'stale')
+        preview = self.store.preview_migration()
+        self.assertEqual(preview['mapping']['restrictions'][0]['event_basis'], original)
+        self.assess(target, self.resolution(target))
+        self.state = self.old('dispatch', '--revision', str(self.state['revision']), '--step-id', 'design',
+            '--skill-id', 'codebase-design', '--input-version', 'synthetic-replacement-v1')
+        self.result()
+        before = self.store.path.read_bytes()
+        preview = self.store.preview_migration()
+        self.assertEqual(self.state['frames'][0]['status'], 'superseded')
+        self.assertEqual(preview['mapping']['restrictions'], [])
+        self.assertIn(original, preview['inventory']['snapshot']['events'])
+        self.assertEqual(self.store.path.read_bytes(), before)
+
+
 if __name__ == '__main__':
     unittest.main()
