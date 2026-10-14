@@ -211,6 +211,70 @@ class LegacyCompatibilityTests(unittest.TestCase):
         self.assertEqual(state['frames'][-1]['step_id'], 'b')
         self.assertEqual(state['migration']['compatibility']['receipts'][0]['status'], 'pending')
 
+    def assert_retained_reference_cannot_be_rebound(self, kind, historical=False):
+        if kind == 'check':
+            frame, result, statement, target, counter = self.real_old_check()
+            statements = [statement]
+        else:
+            frame = self.start_legacy()
+            result, statements = self.old_result(frame), []
+            target = Path(result['artifacts'][0])
+            if kind != 'artifact':
+                target = self.project / ('retained-' + kind + '.md')
+                target.write_text('Synthetic original retained evidence A.', encoding='utf-8')
+                if kind == 'acceptance':
+                    result['acceptance_checks'] = [{'id': '1', 'kind': 'technical', 'status': 'passed',
+                        'completion_checked': True, 'evidence': [str(target)]}]
+                else:
+                    result['grill_delivery'] = {'document': str(target)}
+        original_bytes = target.read_bytes()
+        if historical:
+            self.state = self.old('return', '--revision', str(self.state['revision']),
+                                  '--payload', self.save('retained-history', result))
+        state = self.store.apply_migration(self.compatible_preview())['state']
+        if not historical:
+            state = self.store.receive(state['revision'], result)
+        reviewer, state = self.professional_verification(frame, statements, root=historical)
+        before = self.store.path.read_bytes()
+        target.write_bytes(original_bytes + b'\nSynthetic replacement B after professional return.')
+        with self.assertRaises(ValueError):
+            self.store.qualify_legacy(state['revision'], frame['frame_id'], reviewer['frame_id'])
+        self.assertEqual(self.store.path.read_bytes(), before)
+        with self.assertRaises(ValueError):
+            self.store.complete(state['revision'], [])
+        self.assertEqual(self.store.path.read_bytes(), before)
+        target.write_bytes(original_bytes)
+        state = self.store.qualify_legacy(state['revision'], frame['frame_id'], reviewer['frame_id'])
+        receipt = state['migration']['compatibility']['receipts'][-1]
+        accepted = next(e for e in state['events'] if e['event_id'] == result['event_id'])
+        self.assertEqual(accepted, receipt['normalized'])
+        if not historical:
+            self.assertEqual(receipt['payload'], result)
+        if kind == 'check':
+            self.assertEqual(counter.read_text(), '1')
+        if kind in {'acceptance', 'grill'}:
+            target.write_bytes(original_bytes + b'\nSynthetic later change after qualification.')
+            with self.assertRaises(ValueError):
+                self.store.complete(state['revision'], [])
+            state = self.store.resume(state['revision'])
+            self.assertEqual(state['frames'][0]['status'], 'stale')
+            self.assertEqual(state['migration']['compatibility']['receipts'][-1]['normalized'], accepted)
+
+    def test_qualification_cannot_rebind_retained_artifact(self):
+        self.assert_retained_reference_cannot_be_rebound('artifact')
+
+    def test_qualification_cannot_rebind_retained_acceptance_evidence(self):
+        self.assert_retained_reference_cannot_be_rebound('acceptance')
+
+    def test_qualification_cannot_rebind_retained_grill_document(self):
+        self.assert_retained_reference_cannot_be_rebound('grill')
+
+    def test_qualification_cannot_rebind_retained_check_record(self):
+        self.assert_retained_reference_cannot_be_rebound('check')
+
+    def test_historical_qualification_cannot_rebind_original_artifact(self):
+        self.assert_retained_reference_cannot_be_rebound('artifact', historical=True)
+
     def test_insufficient_identity_or_unknown_calls_remain_pending_and_idempotent(self):
         frame = self.start_legacy()
         state = self.store.apply_migration(self.compatible_preview())['state']

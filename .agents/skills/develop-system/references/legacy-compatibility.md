@@ -37,7 +37,7 @@
 
 identity.status 为 verified 或 insufficient。required_calls 的 null 表示尚不明确；明确数组是针对这项原工作、阅读原依据后作出的适用性结论，不是缺字段的默认值。每个实际必需调用使用 `{skill_id, skill_path, skill_sha256}`，必须收到对应父帧下该来源的必要助手有效回流。旧子帧自己的资格未明确时也不能越过它完成父任务；另一票、另一父帧或过期助手不能顶替。
 
-报告接收后调用 `RunStore.qualify_legacy(revision, original_frame_id, professional_source_frame_id)`，或 CLI `qualify-legacy --frame-id <原帧> --source-frame-id <专业帧> --revision <当前 revision>`。该操作持普通运行锁，追加核验事实，复用统一回流和完成校验。身份不足或调用要求未知保存为 pending；有充分依据才将已留存结果用于当前资格。重复消费同一专业结论幂等。专业报告、相关内容或来源失效时资格随之失效，原事件和记录不改写。
+报告接收后调用 `RunStore.qualify_legacy(revision, original_frame_id, professional_source_frame_id)`，或 CLI `qualify-legacy --frame-id <原帧> --source-frame-id <专业帧> --revision <当前 revision>`。该操作持普通运行锁，追加核验事实，复用统一回流和完成校验。应用前按首次留存的规范引用核对 artifacts、检查记录、AC 证据与 grill 文档的原 hash；内容变化则拒绝且不改状态，不能按原 payload 的路径重新取 hash 来批准新内容。统一回流消费首次绑定的引用，原 payload 与留存引用都不回填。身份不足或调用要求未知保存为 pending；有充分依据才将已留存结果用于当前资格。重复消费同一专业结论幂等。所有这些原引用、专业报告或来源随后失效时资格随之失效，原事件和记录不改写。
 
 ## v1 检查复用
 

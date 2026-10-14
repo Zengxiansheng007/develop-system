@@ -196,6 +196,15 @@ def qualify(state, frame_id, source_frame_id):
             compatibility['receipts'].append(receipt)
     if not receipt or receipt['status'] != 'pending':
         raise ValueError('No pending original return to qualify')
+    # Revalidate the first receipt's hashes, never recapture the raw payload's paths.
+    retained = normalize_payload(state, receipt['normalized'])
+    evidence.extend(retained['artifacts'])
+    evidence.extend(check['record'] for check in retained['checks'])
+    for criterion in retained.get('acceptance_checks', []):
+        evidence.extend(criterion.get('evidence', []))
+    delivery = retained.get('grill_delivery')
+    if isinstance(delivery, dict) and delivery.get('document'):
+        evidence.append(delivery['document'])
     revalidation = []
     if identity['status'] != 'verified':
         revalidation.append({'frame_id': frame_id, 'kind': 'identity', 'reason': 'Original identity basis is insufficient'})
@@ -215,7 +224,7 @@ def qualify(state, frame_id, source_frame_id):
     if receipt.get('origin') == 'history':
         state['next_decision'] = {'action': 'reassess_parent_or_next', 'frame_id': frame_id}
         return None
-    return copy.deepcopy(receipt['payload'])
+    return retained
 
 
 def qualify_checks(state, frame, returned, conclusion, event):
