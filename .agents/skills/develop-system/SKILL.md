@@ -28,7 +28,7 @@ license: MIT
 
 1. 读取当前项目 AGENTS.md、目标、范围与已有产物；当前指令优先于旧笔记。验收条件从用户目标或规格提取，语义不明确时分派需求技能。
 2. 读取 [registry.json](registry.json) 与 [统一执行协议](references/codex-runtime.md)，按任务裁剪计划。已有有效规格、测试或评审结果可复用，来源及版本须保留。
-3. 使用 [状态工具](references/state-operations.md) 创建/恢复目标项目独立 run。当前候选创建 v4；v3 只读，显式迁移能力另行交付，v1/v2 不自动续跑。局部限制见[作用范围](references/scoped-state.md)。
+3. 使用 [状态工具](references/state-operations.md) 创建/恢复目标项目独立 run。当前候选创建 v4；v3 在显式采用前只读。需要预览、明确采用或恢复旧运行时，读取[迁移协议](references/migration-preview.md)及其旧帧兼容入口；真实运行采用须取得单运行授权，能力可用不代表已获授权。v1/v2 不自动续跑。局部限制见[作用范围](references/scoped-state.md)。
    直接 grill、受管访谈或恢复访谈时，先读取 [grill 入口与回流操作](references/grill-routing.md)，通过只读判定确认归属，不使用历史最新运行猜测。
 4. 解析实际技能路径并读取正文，记录文件 hash。用户路径和会话目录优先；目录未列出时按项目 .agents/skills、.codex/skills、用户 .agents/skills、.codex/skills 查找。同名只选一个版本。
 5. 分派最早就绪且必要的工作。模板是可裁剪路线，不是每个任务都必须执行全部技能。
