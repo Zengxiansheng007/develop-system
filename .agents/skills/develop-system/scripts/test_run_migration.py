@@ -17,7 +17,7 @@ class RunMigrationTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.project = Path(self.temp.name)
+        self.project = Path(self.temp.name).resolve()  # TEMP may be an NTFS alias for the same state file.
         self.store = RunStore(self.project, 'synthetic-adoption')
         self.legacy = SKILL_ROOT / 'scripts/fixtures/legacy-v3'
         registry = json.loads((self.legacy / 'registry.json').read_text(encoding='utf-8'))

@@ -1,5 +1,6 @@
 """Actual Git/command checks; professional results and authorization are synthetic fixtures."""
 import copy
+import ctypes  # Exercise real Windows filename aliases without mocked path identities.
 import json
 import os
 import py_compile
@@ -19,7 +20,7 @@ class WorktreeCheckTests(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root=Path(self.temp.name)
+        self.root=Path(self.temp.name).resolve()  # Fixture expectations use the same canonical location as RunStore.
         self.project=self.root/'main'
         self.project.mkdir()
         self.git=shutil.which('git')
@@ -105,6 +106,35 @@ class WorktreeCheckTests(unittest.TestCase):
         with self.assertRaises(ValueError):self.store.receive(self.state['revision'],self.event(frame,path))
         self.assertEqual(self.store.path.read_bytes(),before)
 
+    def test_empty_linked_directory_is_checked_before_command_execution(self):
+        frame = self.dispatch()  # Use the actual dispatched source ranges.
+        target = self.worktree / 'private-empty'  # This directory is outside the authorized ranges.
+        target.mkdir()  # No descendant file is needed to expose the skipped directory check.
+        self.directory_link(self.worktree / 'src/linked-empty', target)  # Real junction or POSIX symlink.
+        before = self.store.path.read_bytes()  # Rejected evidence must preserve authoritative state.
+        path, record = self.check(frame)  # Exercise the public recorder with the original command.
+        self.assertEqual(record['status'], 'failed')  # Reject even when recursive glob yields no files.
+        self.assertIn('source scope', record['error'])  # Match the original Linux failure's required guard.
+        self.assertIsNone(record['execution_command'])  # Reject before any candidate command is launched.
+        self.assertNotIn('candidate', record)  # Do not collect an unauthorized candidate fingerprint.
+        with self.assertRaises(ValueError):  # Failed evidence cannot complete the dispatched frame.
+            self.store.receive(self.state['revision'], self.event(frame, path))  # Public return seam.
+        self.assertEqual(self.store.path.read_bytes(), before)  # No accepted state is manufactured.
+
+    def test_lexical_sensitive_link_cannot_collect_an_allowed_target(self):
+        frame = self.dispatch()  # The ordinary target is within the dispatched source range.
+        target = self.worktree / 'src/ordinary'  # Its content itself is permitted.
+        target.mkdir()  # Only the link name creates the exclusion.
+        (target / 'note.py').write_text('SYNTHETIC=True\n', encoding='utf-8')  # No actual credential data.
+        self.directory_link(self.worktree / 'src/credentials', target)  # Keep the lexical sensitive name.
+        before = self.store.path.read_bytes()  # Rejection must not change the real test run.
+        _, record = self.check(frame)  # Public recorder observes the original source selection.
+        self.assertEqual(record['status'], 'failed')  # Name expansion must not erase sensitive link names.
+        self.assertIn('Sensitive', record['error'])  # Verify the intended exclusion triggered.
+        self.assertIsNone(record['execution_command'])  # The command must never read through the link.
+        self.assertNotIn('candidate', record)  # No fingerprint can qualify this candidate.
+        self.assertEqual(self.store.path.read_bytes(), before)  # The rejected check is not accepted evidence.
+
     def test_observer_excludes_sensitive_targets_before_collecting_hashes(self):
         target=self.worktree/'src/credentials';target.mkdir()
         note=target/'note.py';note.write_text('SYNTHETIC=True\n',encoding='utf-8')
@@ -148,6 +178,21 @@ class WorktreeCheckTests(unittest.TestCase):
         self.assertEqual(record['status'],'failed')
         self.assertIn('source scope',record['error'])
         self.assertIsNone(record['execution_command'])
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows short-name behavior')
+    def test_short_name_command_loads_the_authorized_worktree(self):
+        frame = self.dispatch()  # Authorization fixes the canonical worktree identity.
+        buffer = ctypes.create_unicode_buffer(32768)  # Preserve long Windows paths.
+        length = ctypes.windll.kernel32.GetShortPathNameW(str(self.worktree), buffer, len(buffer))  # Use a real alias.
+        if not length or buffer.value == str(self.worktree):  # Some volumes disable short names.
+            self.skipTest('NTFS short names are unavailable for this fixture')
+        alias = Path(buffer.value)  # The source bytes and Git identity remain unchanged.
+        record_path = self.root / 'short-name.json'  # Preserve the original execution record.
+        record = run_record([sys.executable, '-B', str(alias / 'tests/check.py'), str(alias / 'src')],
+            alias, record_path, binding=frame['worktree_binding'], candidate=self.candidate())  # Public managed seam.
+        self.assertEqual(record['status'], 'passed', json.dumps({'error': record['error'], 'stderr': record['stderr'], 'observation': record.get('observation'), 'root': frame['worktree_binding']['worktree']['root']}))  # Keep boundary diagnostics for alias failures.
+        state = self.store.receive(self.state['revision'], self.event(frame, record_path))  # Verify real return acceptance.
+        self.assertEqual(state['frames'][0]['status'], 'completed')  # Preserve normal lifecycle behavior.
 
     def test_authorized_external_worktree_executes_dirty_candidate_and_returns(self):
         frame=self.dispatch()

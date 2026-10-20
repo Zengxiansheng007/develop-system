@@ -1,5 +1,7 @@
 """Shared managed-check identities; authorization stays on the dispatched frame."""
 import hashlib
+import ctypes  # Expand Windows filename aliases without following directory links.
+import os  # Select only the native Windows spelling adapter.
 import json
 from pathlib import Path
 import subprocess
@@ -82,8 +84,23 @@ def validate_binding(binding,cwd):
         raise ValueError('Check cwd is an unassigned worktree outside execution scope')
 
 
+def lexical_path(path):
+    """Expand short names while preserving link names for exclusion checks."""
+    if os.name != 'nt':  # POSIX has no NTFS filename aliases.
+        return path  # Keep its existing lexical authorization semantics.
+    expand = ctypes.WinDLL('kernel32', use_last_error=True).GetLongPathNameW  # Use the native naming contract.
+    expand.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint32]  # Preserve Unicode paths.
+    expand.restype = ctypes.c_uint32  # The result is a character count.
+    buffer = ctypes.create_unicode_buffer(32768)  # Cover the Windows extended path limit.
+    length = expand(str(path), buffer, len(buffer))  # Expand aliases without resolving symlink targets.
+    if not length or length >= len(buffer):  # An unverified spelling cannot bypass scope checks.
+        raise OSError('Cannot expand Windows candidate path spelling')  # Fail closed before reading bytes.
+    return Path(buffer.value)  # Preserve lexical credential/link names for the checks below.
+
+
 def authorized_source(root,source_ranges,path):
     """Authorize the actual target before any candidate/observer byte collection."""
+    path=lexical_path(path)  # Alias spelling is separate from the actual linked target.
     target=path.resolve(strict=True)
     # Ranges were canonicalized at dispatch. Do not resolve them again: replacing
     # a permitted directory with a link must not move the original authorization.
@@ -120,8 +137,9 @@ def candidate_snapshot(binding,selection):
         authorized_source(root,binding['source_ranges'],root/item['path'])
         if not start.exists():raise ValueError('Related range missing')
         for path in ([start] if start.is_file() else sorted(start.rglob('*'))):
-            if not path.is_file() or '__pycache__' in path.parts or path.suffix=='.pyc':continue
-            target=authorized_source(root,binding['source_ranges'],path)
+            if '__pycache__' in path.parts or path.suffix=='.pyc':continue  # Bytecode remains outside the source candidate.
+            target=authorized_source(root,binding['source_ranges'],path)  # Directories must pass scope checks even without files.
+            if not path.is_file():continue  # Hash only files after authorizing their actual targets.
             name=path.relative_to(root).as_posix()
             evidence={'path':name,'sha256':hashlib.sha256(target.read_bytes()).hexdigest(),'role':item['role']}
             if name in files and files[name]!=evidence:raise ValueError('Overlapping candidate roles')
