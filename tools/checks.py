@@ -78,8 +78,11 @@ def main():
     parser.add_argument('--installed', nargs='?', const=str(installed_root()),
         help='Also require installed copies (defaults to CODEX_HOME/skills)')
     parser.add_argument('--output-dir', help='New result directory; never reuse previous results')
+    parser.add_argument('--timeout', type=float, default=300, help='Bounded seconds for each actual verification command')
     parser.add_argument('--stage', choices=['dependencies', 'format', 'registry', 'copies'], help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.timeout <= 0:
+        parser.error('timeout must be positive')
     if args.stage:
         stage(args.stage, args.installed)
         return 0
@@ -104,8 +107,8 @@ def main():
     records = []
     for name, command in commands:
         path = output / (name + '.json')
-        record = run_record(command, ROOT, path)
-        records.append({'name': name, 'status': record['status'], 'exit_code': record['exit_code'],
+        record = run_record(command, ROOT, path, timeout=args.timeout)
+        records.append({'name': name, 'status': record['status'], 'exit_code': record['exit_code'], 'context': record['context'],
             'record': {'path': str(path), 'sha256': hashlib.sha256(path.read_bytes()).hexdigest()}})
         print(f'{name}: {record["status"]} (exit={record["exit_code"]})', flush=True)
     passed = all(r['status'] == 'passed' for r in records)

@@ -18,6 +18,8 @@ class DurableWorkflowTests(unittest.TestCase):
             path = self.root / (item["id"] + ".md")
             path.write_text("---\nname: " + item["id"] + "\ndescription: fixture\n---\n", encoding="utf-8")
             item["path"] = str(path)
+            # Synthetic workflow fixture: optional child graphs are selected by each test.
+            item['required_calls'] = []
         self.registry.write_text(json.dumps(data), encoding="utf-8")
         self.output = self.root / "output.txt"
         self.output.write_text("verified output", encoding="utf-8")
@@ -33,7 +35,7 @@ class DurableWorkflowTests(unittest.TestCase):
 
     def event(self, state, status="completed", **kwargs):
         frame = state["frames"][-1]
-        return {"event_id": frame["frame_id"] + "-return", "run_id": "test-run", "frame_id": frame["frame_id"],
+        return {"protocol_version": 1, "event_id": frame["frame_id"] + "-return", "run_id": "test-run", "frame_id": frame["frame_id"],
                 "parent_frame_id": frame["parent_frame_id"], "skill_id": frame["skill_id"], "input_version": frame["input_version"],
                 "mode": frame["mode"], "execution": "sequential", "status": status, "return_to": "develop-system",
                 "completion_checked": True, "artifacts": [str(self.output)] if status == "completed" else [],
@@ -48,6 +50,17 @@ class DurableWorkflowTests(unittest.TestCase):
     def complete(self, state):
         source = state["frames"][-1]["frame_id"] if state["frames"] else "missing"
         return self.store.complete(state["revision"], [{"id": "1", "source_frame_id": source}])
+
+    def test_default_bundle_dispatches_canonical_research_source(self):
+        # Source resolution only; this fixture does not execute research or a model.
+        state = self.store.create('canonical source selection',
+            [{'step_id': 'research', 'skill_id': 'research'}], ['source identity'], SKILL_ROOT / 'registry.json')
+        selected = self.store.preflight('research')['research']
+        state = self.store.dispatch(state['revision'], 'research', 'canonical-v1', 'research')
+        frame = state['frames'][-1]
+        self.assertEqual(frame['skill_path'], str((SKILL_ROOT.parent / 'research/SKILL.md').resolve()))
+        self.assertEqual(frame['skill_sha256'], selected['sha256'])
+        self.assertNotIn('matt-research', [s['id'] for s in state['registry']['skills']])
 
     def test_navigation_cannot_even_create_state_directory(self):
         for entry in ("ask-matt", "/ask-matt", "$ask-matt"):
@@ -124,13 +137,16 @@ class DurableWorkflowTests(unittest.TestCase):
         state = self.receive(self.dispatch(state, "to-spec", "spec-step"))
         self.assertEqual(self.complete(state)["status"], "completed")
 
-    def test_resume_interrupts_old_frames_and_supersedes_all_descendants(self):
-        state = self.dispatch(self.create())
+    def test_changed_root_inputs_invalidate_old_frames_and_all_descendants(self):
+        source = self.root / "root-input.txt"
+        source.write_text("original source", encoding="utf-8")
+        state = self.dispatch(self.create(), inputs=[str(source)])
         root = state["frames"][-1]["frame_id"]
         old_event = self.event(state)
         state = self.dispatch(state, "domain-modeling", parent=root)
         child = state["frames"][-1]["frame_id"]
         state = self.dispatch(state, "codebase-design", parent=child)
+        source.write_text("changed source", encoding="utf-8")
         state = self.store.resume(state["revision"])
         with self.assertRaises(ValueError):
             self.store.receive(state["revision"], old_event)
@@ -175,7 +191,7 @@ class DurableWorkflowTests(unittest.TestCase):
         for _ in range(2):
             state = self.dispatch(state)
             state = self.receive(state, status="failed")
-        self.assertEqual(state["status"], "blocked")
+        self.assertEqual(state["status"], "running")
         self.assertEqual(state["next_decision"]["action"], "stop_repeated_no_progress")
         self.assertEqual(ready_steps(state), [])
 
@@ -224,12 +240,12 @@ class DurableWorkflowTests(unittest.TestCase):
         state = self.create()
         state = self.store.control(state["revision"], "paused", "user requested pause")
         self.assertEqual(ready_steps(state), [])
-        state = self.store.resume(state["revision"])
+        state = self.store.resume(state["revision"], user_reference="synthetic user continuation")
         state = self.store.control(state["revision"], "cancelled", "user requested cancellation")
         with self.assertRaises(ValueError):
             self.store.resume(state["revision"])
         state["schema_version"] = 1
-        self.store.write_atomic(state)
+        self.store.path.write_text(json.dumps(state), encoding="utf-8")
         with self.assertRaises(ValueError):
             self.store.read()
 
@@ -282,7 +298,7 @@ class DurableWorkflowTests(unittest.TestCase):
             self.dispatch(state)
         self.assertEqual(self.store.read()["frames"], [])
         state = self.store.block_unavailable(state["revision"], "research", "file missing", "research-step")
-        self.assertEqual(state["status"], "blocked")
+        self.assertEqual(state["status"], "running")
         self.assertEqual(state["next_decision"]["action"], "missing_skill")
         path.write_text("---\nname: research\ndescription: restored\n---\n", encoding="utf-8")
         state = self.store.resume(state["revision"])
@@ -309,7 +325,7 @@ class DurableWorkflowTests(unittest.TestCase):
     def test_legacy_v2_cannot_restore_controller_owned_acceptance(self):
         state = self.create()
         state["schema_version"] = 2
-        self.store.write_atomic(state)
+        self.store.path.write_text(json.dumps(state), encoding="utf-8")
         with self.assertRaises(ValueError):
             self.store.read()
 

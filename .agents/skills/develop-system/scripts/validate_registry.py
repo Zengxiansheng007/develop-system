@@ -4,13 +4,49 @@ import json
 import re
 import sys
 from pathlib import Path
+from codex_runtime import resolve_skill
 
 
-def validate(data, root):
+def required_closure(data, names, select, prerequisites=False):
+    """Qualify only the requested call graph with the caller's actual source selector."""
+    index = {item['id']: item for item in data['skills']}
+    selected, active = {}, []
+    def visit(name, helper=False):
+        if name in active:
+            raise ValueError('Required call cycle: ' + ' -> '.join([*active, name]))
+        item = index.get(name)
+        if not item or not item.get('enabled') or item.get('role') == 'controller':
+            raise ValueError('Unavailable required capability: ' + ' -> '.join([*active, name]))
+        if not isinstance(item.get('required_calls'), list):
+            raise ValueError(name + ': missing required_calls declaration')
+        source = selected.get(name) or select(name, item)
+        if helper and not source.get('callable', True):
+            raise ValueError(name + ': invocation policy forbids helper calls')
+        if name in selected:
+            return
+        active.append(name)
+        selected[name] = source
+        for target in item['required_calls']:
+            visit(target, True)
+        if prerequisites:
+            for target in item['requires']:
+                visit(target)
+        active.pop()
+    for name in names:
+        visit(name)
+    return selected
+
+
+def package_source(name, item, root):
+    path = item.get('path', '../' + name + '/SKILL.md')
+    return resolve_skill(name, explicit=Path(root) / path)
+
+
+def validate(data, root, package=True):
     errors = []
     if not isinstance(data, dict):
         return ["Registry must be an object"]
-    if data.get("schema_version") != 2:
+    if data.get("schema_version") != 3:
         errors.append("Unsupported schema_version")
     if data.get("controller_policy") != "dispatch-only":
         errors.append("Controller must be dispatch-only")
@@ -29,7 +65,7 @@ def validate(data, root):
     if not isinstance(entries, list):
         return errors + ["skills must be an array"]
     index = {}
-    required = {"id", "stage", "role", "enabled", "return_to", "fallback", "when", "done_when", "requires", "outputs"}
+    required = {"id", "stage", "role", "enabled", "return_to", "fallback", "when", "done_when", "requires", "required_calls", "outputs"}
     for item in entries:
         if not isinstance(item, dict):
             errors.append("Skill entry must be an object")
@@ -63,7 +99,7 @@ def validate(data, root):
                 errors.append(f"{skill_id}: empty {field}")
         if "inline" in item:
             errors.append(f"{skill_id}: inline execution is forbidden for dispatch-only controller")
-        for field in ("requires", "outputs", "next_candidates"):
+        for field in ("requires", "required_calls", "outputs", "next_candidates"):
             values = item.get(field, [])
             if not isinstance(values, list) or any(not isinstance(v, str) or not v for v in values):
                 errors.append(f"{skill_id}: {field} must be a string array")
@@ -73,11 +109,11 @@ def validate(data, root):
             path = item["path"]
             if not isinstance(path, str) or not path:
                 errors.append(f"{skill_id}: invalid path")
-            elif not (root / path).is_file():
+            elif package and not (root / path).is_file():
                 errors.append(f"{skill_id}: explicit skill path does not exist: {path}")
     if controller not in index or index[controller].get("role") != "controller" or index[controller].get("enabled") is not True:
         errors.append("Enabled controller entry is required")
-    for skill_id, item in index.items():
+    for skill_id, item in index.items() if package else []:
         for field in ("requires", "next_candidates"):
             values = item.get(field, [])
             if not isinstance(values, list):
@@ -108,8 +144,15 @@ def validate(data, root):
         active.remove(skill_id)
         visited.add(skill_id)
 
-    for skill_id in index:
+    for skill_id in index if package else []:
         visit(skill_id)
+    if package:
+        for skill_id, item in index.items():
+            if item.get('enabled') and item.get('required_calls'):
+                try:
+                    required_closure(data, [skill_id], lambda name, entry: package_source(name, entry, root))
+                except (OSError, ValueError, KeyError, TypeError) as exc:
+                    errors.append(skill_id + ': ' + str(exc))
     for field in ("aliases", "default_flows"):
         mapping = data.get(field, {})
         if not isinstance(mapping, dict):
@@ -123,9 +166,9 @@ def validate(data, root):
                 errors.append(f"{field}.{name}: invalid targets")
                 continue
             for target in targets:
-                if not isinstance(target, str) or target not in index:
+                if not isinstance(target, str) or (package and target not in index):
                     errors.append(f"{field}.{name}: unknown target")
-                elif not index[target].get("enabled"):
+                elif package and not index[target].get("enabled"):
                     errors.append(f"{field}.{name}: disabled target {target}")
                 elif field == "default_flows" and target == controller:
                     errors.append(f"{field}.{name}: controller cannot be a leaf step")

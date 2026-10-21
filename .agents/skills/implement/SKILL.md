@@ -9,7 +9,7 @@ description: "Implement a piece of work based on a spec or set of tickets."
 
 正文的 Skill 工具及 `/skill` 写法，在 Codex 中按真实路径读取对应 SKILL.md。嵌套专业工作登记子帧，结果先回流总路由。委派有授权和可用工具时使用真实子代理，否则切换到专业技能顺序执行；仅修改技能文件不启动子代理。分支、提交、远程工单和 PR 操作遵守用户授权与实际仓库条件，不假定已获发布或外部写入授权。
 
-本技能负责单个任务或明确规格的实现及相关验证；tdd 和 code-review 为子技能。测试/评审返回总路由后恢复 implement；范围内缺陷完成修复和重新验证后再结束。当前请求允许时按既有提交约定处理，没有仓库时报告产物，不虚构提交。
+本技能负责单个任务或明确规格的实现及相关验证；无条件辅助义务以 [registry.json](../develop-system/registry.json) 本项 required_calls 为唯一声明，条件辅助工作依正文选择。测试/评审返回总路由后恢复 implement；范围内缺陷完成修复和重新验证后再结束。当前请求允许时按既有提交约定处理，没有仓库时报告产物，不虚构提交。
 
 Implement the work described by the user in the spec or tickets.
 
@@ -17,6 +17,6 @@ Use /tdd where possible, at pre-agreed seams.
 
 Run typechecking regularly, single test files regularly, and the full test suite once at the end.
 
-Once done, use /code-review to review the work.
+Before completion, obtain the review required by this skill's declaration in [registry.json](../develop-system/registry.json).
 
 Commit your work to the current branch.

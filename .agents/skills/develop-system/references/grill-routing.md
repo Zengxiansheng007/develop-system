@@ -11,7 +11,7 @@
 - independent：按独立访谈执行，不 init。当前文档确认后列出 to-spec 和 implement、各自产物及推荐原因，停止等待明确选择。确认文档或“全部采用”不等于选择技能。
 - managed：由调度器登记或复用帧，再让 grill 执行；不得直接写入结果或跳过专业父任务。
 - clarify：说明具体归属或恢复缺口，等待真实答复；候选不写入。
-- resume：先处理原等待/阻塞条件或过期证据，再调用既有 resume 并重新检查。paused 必须明确要求恢复；recovery_ready/resume_paused 只记录真实恢复依据，不由时间或工具默认填 true。
+- resume：先处理原等待/阻塞条件或过期证据，再调用 resume 并重新检查。paused 必须明确要求恢复并传 --user-reference；recovery_ready/resume_paused 只记录真实恢复依据，不由时间或工具默认填 true。
 
 纯决策接口 grill_routing.decide_entry 接收上下文与只读候选；independent_finish 接收已保存的交付对象、当前版本确认和后续显式 choice。交付对象含 document、version、confirmation_reference、checklist；choice 只能在真实后续选择时填写 to-spec / implement。
 
@@ -21,7 +21,7 @@
 
 补充正在进行的专业任务时，调度器在上下文中传 parent_frame_id（或绑定该专业 frame_id），再登记辅助帧。已有其他活动专业任务且未确定父关系时，工具拒绝接入，由调度器解释上下文归属；不能将它跳过或关闭。没有活动父任务时选择唯一就绪根 grill 步骤；若没有，先由调度器用 extend-plan 登记依赖合法的必要步骤，再 attach，不自动 init。
 
-输入变化、中断、等待或阻塞沿既有 resume 重新核验，重新分派专业父任务后再登记辅助。paused 需要真实明确恢复；旧 schema 不转换。重复接入不新增帧，旧版本/旧 revision 不能覆盖新状态。
+输入变化、中断、等待或阻塞沿 resume 重新核验；保留有效在途专业父任务，只有失效/中断的父任务才明确重新分派后登记辅助。paused 需要真实明确恢复；旧 schema 不转换。重复接入不新增帧，旧版本/旧 revision 不能覆盖新状态。
 
 根文档变更后重新回流选路，会退役同一根步骤曾创建且已失效的路线分支，保留历史事件；已复用的外部产物仍属于原计划。旧分支有未决发现时先交相应专业技能处理，不能用选路抹去发现。
 

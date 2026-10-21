@@ -48,7 +48,7 @@ def decide_entry(context, candidates):
         if not selected:
             return output
     run = selected[0]
-    if (run.get('schema_version') != 3 or run.get('mode') != 'execute'
+    if (run.get('schema_version') != 4 or run.get('mode') != 'execute'
             or run.get('entrypoint') != 'develop-system' or run.get('controller_policy') != 'dispatch-only'
             or not isinstance(run.get('revision'), int) or not isinstance(run.get('frames'), list)):
         return decision('clarify', 'Candidate requires explicit migration or repair', run)

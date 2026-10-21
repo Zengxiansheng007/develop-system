@@ -1,0 +1,177 @@
+"""Shared managed-check identities; authorization stays on the dispatched frame."""
+import hashlib
+import ctypes  # Expand Windows filename aliases without following directory links.
+import os  # Select only the native Windows spelling adapter.
+import json
+from pathlib import Path
+import subprocess
+import uuid
+
+
+def digest(value):
+    return hashlib.sha256(json.dumps(value,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+
+
+def git_identity(root):
+    root=Path(root).resolve(strict=True)
+    def git(*args):
+        try:
+            return subprocess.check_output(['git','-C',str(root),*args],stderr=subprocess.PIPE,
+                text=True,encoding='utf-8').strip()
+        except subprocess.CalledProcessError as exc:
+            raise ValueError('Actual Git worktree required') from exc
+    # One Git observation avoids repeated process launches for every consumer.
+    top_name,common_name,directory_name=git('rev-parse','--path-format=absolute',
+        '--show-toplevel','--git-common-dir','--absolute-git-dir').splitlines()
+    top=Path(top_name).resolve()
+    if top != root:raise ValueError('Exact Git worktree root required')
+    paths={'root':root,'common_dir':Path(common_name).resolve(),'git_dir':Path(directory_name).resolve()}
+    def identity(path):
+        stat=path.stat()
+        return {'device':stat.st_dev,'inode':stat.st_ino}
+    return {**{name:str(path) for name,path in paths.items()},
+            'object_ids':{name:identity(path) for name,path in paths.items()}}
+
+
+def relative(root,value):
+    if not isinstance(value,str) or not value or Path(value).is_absolute():
+        raise ValueError('Explicit relative candidate range required')
+    path=(root/value).resolve()
+    if not path.is_relative_to(root):raise ValueError('Candidate range escapes worktree')
+    return path
+
+
+def bind_worktree(project,run_id,frame_id,input_version,declaration):
+    if not isinstance(declaration,dict) or not isinstance(declaration.get('authorization_reference'),str) or not declaration['authorization_reference'].strip():
+        raise ValueError('Existing task authorization reference required')
+    project_id=git_identity(project)
+    worktree=git_identity(declaration['worktree'])
+    if project_id['common_dir'] != worktree['common_dir']:
+        raise ValueError('Worktree belongs to another repository')
+    roots=declaration.get('execution_roots')
+    ranges=declaration.get('source_ranges')
+    if not isinstance(roots,list) or not roots or not isinstance(ranges,list) or not ranges:
+        raise ValueError('Explicit execution and source scopes required')
+    execution=[]
+    for item in roots:
+        path=Path(item).resolve(strict=True)
+        if not path.is_dir() or not any(path.is_relative_to(Path(i['root'])) for i in (project_id,worktree)):
+            raise ValueError('Execution root outside assigned project/worktree')
+        execution.append(str(path))
+    source=[relative(Path(worktree['root']),p).relative_to(worktree['root']).as_posix() for p in ranges]
+    return {'binding_id':uuid.uuid4().hex,'run_id':run_id,'frame_id':frame_id,'input_version':input_version,
+            'authorization_reference':declaration['authorization_reference'],'project':project_id,'worktree':worktree,
+            'execution_roots':execution,'source_ranges':source}
+
+
+def validate_worktree(binding):
+    if not binding:raise ValueError('Explicit current worktree binding required')
+    if git_identity(binding['project']['root']) != binding['project'] or git_identity(binding['worktree']['root']) != binding['worktree']:
+        raise ValueError('Repository or worktree identity changed')
+
+
+def validate_binding(binding,cwd):
+    validate_worktree(binding)
+    path=Path(cwd).resolve()
+    if not any(path.is_relative_to(Path(p)) for p in binding['execution_roots']):
+        raise ValueError('Check cwd outside explicit execution scope')
+    try:
+        actual=Path(subprocess.check_output(['git','-C',str(path),'rev-parse','--show-toplevel'],
+            stderr=subprocess.PIPE,text=True,encoding='utf-8').strip()).resolve()
+    except subprocess.CalledProcessError as exc:
+        raise ValueError('Check cwd has no authorized Git execution scope') from exc
+    if str(actual) not in {binding['project']['root'],binding['worktree']['root']}:
+        raise ValueError('Check cwd is an unassigned worktree outside execution scope')
+
+
+def lexical_path(path):
+    """Expand short names while preserving link names for exclusion checks."""
+    if os.name != 'nt':  # POSIX has no NTFS filename aliases.
+        return path  # Keep its existing lexical authorization semantics.
+    expand = ctypes.WinDLL('kernel32', use_last_error=True).GetLongPathNameW  # Use the native naming contract.
+    expand.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint32]  # Preserve Unicode paths.
+    expand.restype = ctypes.c_uint32  # The result is a character count.
+    buffer = ctypes.create_unicode_buffer(32768)  # Cover the Windows extended path limit.
+    length = expand(str(path), buffer, len(buffer))  # Expand aliases without resolving symlink targets.
+    if not length or length >= len(buffer):  # An unverified spelling cannot bypass scope checks.
+        raise OSError('Cannot expand Windows candidate path spelling')  # Fail closed before reading bytes.
+    return Path(buffer.value)  # Preserve lexical credential/link names for the checks below.
+
+
+def authorized_source(root,source_ranges,path):
+    """Authorize the actual target before any candidate/observer byte collection."""
+    path=lexical_path(path)  # Alias spelling is separate from the actual linked target.
+    target=path.resolve(strict=True)
+    # Ranges were canonicalized at dispatch. Do not resolve them again: replacing
+    # a permitted directory with a link must not move the original authorization.
+    if not any(target.is_relative_to(root/p) for p in source_ranges):
+        raise ValueError('Candidate outside authorized source scope')
+    for name in (path,target):
+        if not name.is_relative_to(root):raise ValueError('Candidate escapes worktree')
+        parts=[p.lower() for p in name.relative_to(root).parts]
+        if any(p in {'.git','.env','credentials','secrets.json','credentials.json'} or p.startswith('.env.')
+               for p in parts) or name.suffix.lower() in {'.pem','.key','.pfx'}:
+            raise ValueError('Sensitive or repository metadata excluded from candidate ranges')
+    return target
+
+
+def validate_reference_candidate(record,binding):
+    """A reviewer authorizes the candidate; it does not inherit an execution."""
+    validate_worktree(binding)
+    if any(binding[name] != record['binding'][name] for name in ('project','worktree')):
+        raise ValueError('Reference belongs to another authorized candidate worktree')
+    root=Path(binding['worktree']['root'])
+    for file in record['candidate']['files']:
+        authorized_source(root,binding['source_ranges'],root/file['path'])
+
+
+def candidate_snapshot(binding,selection):
+    root=Path(binding['worktree']['root'])
+    if not isinstance(selection,dict):raise ValueError('Professional candidate selection required')
+    ranges=selection.get('ranges')
+    if not isinstance(ranges,list) or not ranges:raise ValueError('Related candidate ranges required')
+    files={}
+    for item in ranges:
+        if item.get('role') not in {'source','test','config','dependency'}:raise ValueError('Candidate role required')
+        start=relative(root,item['path'])
+        authorized_source(root,binding['source_ranges'],root/item['path'])
+        if not start.exists():raise ValueError('Related range missing')
+        for path in ([start] if start.is_file() else sorted(start.rglob('*'))):
+            if '__pycache__' in path.parts or path.suffix=='.pyc':continue  # Bytecode remains outside the source candidate.
+            target=authorized_source(root,binding['source_ranges'],path)  # Directories must pass scope checks even without files.
+            if not path.is_file():continue  # Hash only files after authorizing their actual targets.
+            name=path.relative_to(root).as_posix()
+            evidence={'path':name,'sha256':hashlib.sha256(target.read_bytes()).hexdigest(),'role':item['role']}
+            if name in files and files[name]!=evidence:raise ValueError('Overlapping candidate roles')
+            files[name]=evidence
+    loaded=selection.get('loaded')
+    entry=selection.get('entry')
+    if not isinstance(loaded,list) or not loaded or entry not in files or any(p not in files for p in loaded):
+        raise ValueError('Entry and expected loaded sources must belong to candidate')
+    result={'selection':selection,'files':[files[p] for p in sorted(files)]}
+    result['candidate_id']=digest(result)
+    return result
+
+
+def validate_managed(record,binding):
+    if record.get('schema_version') != 2 or record.get('context') != 'managed' or not binding or record.get('binding') != binding:
+        raise ValueError('Current checks require their original managed v2 frame binding')
+    validate_binding(binding,record['cwd'])
+    if not isinstance(record.get('candidate'),dict):
+        raise ValueError('Managed check did not collect an authorized candidate')
+    current=candidate_snapshot(binding,record['candidate']['selection'])
+    if current != record['candidate'] or record.get('candidate_after') != current:
+        raise ValueError('Candidate changed or incomplete')
+    observation=record.get('observation',{})
+    root=Path(binding['worktree']['root'])
+    observed={p['path']:p['sha256'] for p in observation.get('loaded',[])}
+    for file in current['files']:
+        path=str(root/file['path'])
+        if file['path'] in current['selection']['loaded'] and observed.get(path) != file['sha256']:
+            raise ValueError('Actual loaded source does not match candidate')
+    declared={str(root/f['path']):f['sha256'] for f in current['files']}
+    if any(path not in declared or declared[path]!=sha for path,sha in observed.items()):
+        raise ValueError('Loaded related source omitted from candidate')
+    if observation.get('adapter') != 'python' or observation.get('entry') != str(root/current['selection']['entry']):
+        raise ValueError('Actual entry does not match candidate')
+    return True

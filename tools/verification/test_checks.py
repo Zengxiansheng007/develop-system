@@ -17,6 +17,8 @@ class RecordedCheckTests(unittest.TestCase):
             root = Path(directory)
             output = root / 'invalid-cwd.json'
             record = run_record([sys.executable, '-c', "print('must not run')"], root / 'missing', output)
+            self.assertEqual(record['schema_version'], 2)
+            self.assertEqual(record['context'], 'independent')
             self.assertEqual(validate_record(record), 'failed')
             self.assertIsNone(record['exit_code'])
             self.assertTrue(record['error'])
@@ -74,7 +76,9 @@ class RecordedCheckTests(unittest.TestCase):
         state = fixture.dispatch(fixture.create())
         record = fixture.root / 'passed.json'
         run_record([sys.executable, '-c', "print('ok')"], fixture.root, record)
-        event = fixture.event(state, checks=[{'status': 'passed', 'record': str(record)}])
+        # Standalone records may remain artifacts; only managed v2 can be command-check proof.
+        # The real worktree suite covers managed check receipt and paused idempotency.
+        event = fixture.event(state, artifacts=[str(record)])
         state = fixture.store.receive(state['revision'], event)
         duplicate = fixture.store.receive(state['revision'], event)
         self.assertEqual(state['revision'], duplicate['revision'])

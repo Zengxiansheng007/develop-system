@@ -37,15 +37,20 @@ return --payload <结果文件> 的结构见 [统一执行协议](codex-runtime.
 
 ## 恢复与迁移
 
-- resume 检查技能、输入、产物、发现和验收证据 hash；变化使相应步骤/依赖和验收失效。未决发现保留，不靠恢复抹去。
-- 中断旧帧由重新分派替代全部后代，旧结果不能覆盖新帧。
+- resume 检查技能、输入、产物、发现和验收证据 hash；变化只使相关帧/依赖及有对应来源的验收失效。有效结果和在途帧保留，未决发现不靠恢复抹去。系统限制按[专业恢复契约](scoped-state.md#系统限制与专业恢复)重新核验。
+- 用户暂停期间 return 仅保存有效回传；明确继续时 resume 增加 --user-reference <真实用户指令来源>，保留有效在途帧。收件与应用结论的边界见[暂停收件](scoped-state.md#暂停收件与明确继续)。
+- 已失效或中断旧帧由明确重新分派替代受影响后代，旧结果不能覆盖新帧。
 - 环境健康由对应专业技能实际验证；哈希一致不证明服务存活。
 - 同技能/输入/阻塞两次无进展停止重试；用户明确暂停/取消时 pause/cancel --reason，完成或取消 run 不恢复。
-- 当前 state schema v3、registry v2。旧 v1/v2 不自动续跑：让对应专业技能核验旧证据并在新 v3 run 返回来源明确的结论，注明旧 run，不把旧调度器的验收视为专业结果。
+- 当前 T01–T10 候选创建 state v4、registry v3；新帧及回流必须携带 protocol_version: 1。必需助手与明确登记见[扩展接口](extensions.md)，工作树检查资格见[机器检查记录](check-records.md)。state v3 或 registry v2 旧快照显式采用前可读取但不能续写，缺义务字段不能当作空义务。需要评估、明确采用或恢复旧运行时，使用[迁移协议](migration-preview.md)中的 preview-migration / apply-migration / rollback-migration；清单内旧帧的原回传使用 return 留存，已回流专业结论使用[qualify-legacy](legacy-compatibility.md#专业核验)追加核验。暂停时只保存，不应用核验或关闭验收。
+
+局部限制、就绪与完成的含义见[作用范围](scoped-state.md)。
 
 ## 扩展与测试
 
 register --payload <描述文件> 保存临时能力；根步骤再 extend-plan。描述使用 [扩展接口](extensions.md)，所有技能真实执行并回流，缺失阻塞。永久能力在共享注册表维护并校验同步。
+
+已有漏登记限制时，先读取其身份和原来源授权，再使用 register --restriction-id <限制身份> --payload <描述文件>。完整步骤、暂停行为及版本拒绝条件统一见[当前运行漏登记](extensions.md#当前运行漏登记)。
 
 `python -B -m unittest discover -s scripts -p 'test_*.py' -v` 验证状态与协议，不能证明每个业务技能已在真实项目执行，也不证明原生斜杠菜单注册。
 

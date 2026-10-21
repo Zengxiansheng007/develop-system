@@ -17,6 +17,8 @@ class GrillRoutingTests(unittest.TestCase):
             path = self.root / (skill['id'] + '.md')
             path.write_text('---\nname: ' + skill['id'] + '\ndescription: fixture\n---\n', encoding='utf-8')
             skill['path'] = str(path)
+            # Synthetic routing fixture; no unconditional auxiliary duties in this test registry.
+            skill['required_calls'] = []
         self.registry = self.root / 'registry.json'
         self.registry.write_text(json.dumps(registry), encoding='utf-8')
         self.store = RunStore(self.root, 'checkout')
@@ -35,7 +37,7 @@ class GrillRoutingTests(unittest.TestCase):
     def grill_event(self, state, delivery=None):
         frame = state['frames'][-1]
         delivery = delivery or self.delivery()
-        return {'event_id':frame['frame_id'] + '-return', 'run_id':state['run_id'],
+        return {'protocol_version':1, 'event_id':frame['frame_id'] + '-return', 'run_id':state['run_id'],
                 'frame_id':frame['frame_id'], 'parent_frame_id':frame['parent_frame_id'],
                 'skill_id':frame['skill_id'], 'input_version':frame['input_version'],
                 'mode':'skill', 'execution':'sequential', 'status':'completed', 'return_to':'develop-system',
@@ -134,8 +136,10 @@ class GrillRoutingTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             other.route_grill(state['revision'], event['event_id'])
 
-    def test_attachment_revalidates_revision_inputs_and_interrupted_frames(self):
-        state = self.store.attach_grill(self.state['revision'], self.context)
+    def test_attachment_revalidates_revision_inputs_and_changed_frames(self):
+        source = self.root / 'interview-input.txt'
+        source.write_text('original inputs', encoding='utf-8')
+        state = self.store.attach_grill(self.state['revision'], self.context, inputs=[str(source)])
         old_event = self.grill_event(state)
         before = self.store.path.read_bytes()
         for revision, context in ((0,self.context), (state['revision'],{**self.context,'input_version':'v2'}),
@@ -143,8 +147,9 @@ class GrillRoutingTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 self.store.attach_grill(revision, context)
             self.assertEqual(before, self.store.path.read_bytes())
+        source.write_text('changed inputs', encoding='utf-8')
         state = self.store.resume(state['revision'])
-        state = self.store.attach_grill(state['revision'], {**self.context,'input_version':'v2'})
+        state = self.store.attach_grill(state['revision'], {**self.context,'input_version':'v2'}, inputs=[str(source)])
         self.assertEqual(state['frames'][0]['status'], 'superseded')
         self.assertEqual(state['frames'][-1]['input_version'], 'v2')
         with self.assertRaises(ValueError):
