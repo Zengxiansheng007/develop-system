@@ -277,7 +277,12 @@ class IssueSync:
         journal['revision'] += 1
         self._save(self.root / 'bindings.json', journal)  # Durable progress is independent of execution authority.
 
-    def _write_body(self, store, journal, binding, progress, state):
+    def _qualification_matches(self, state, projection, binding):
+        return (self._enrolled(state) and state['status'] in {'running', 'completed'} and projection['eligible']
+                and projection.get('candidate_id') == binding['candidate_id']
+                and projection.get('sources') == binding['source_references'])  # Callers supply fresh reads at each distinct stage.
+
+    def _synchronize_issue(self, store, journal, binding, progress, state):
         config = configuration(self.project)['configuration']
         repository, number = config['repository'], binding['issue']['number']
         if not all(callable(getattr(self.github, name, None)) for name in ('update_issue_body', 'remove_issue_label', 'close_issue')):
@@ -295,7 +300,11 @@ class IssueSync:
         known_body = body_operations[-1]['expected_after'] if body_operations else None
         if not isinstance(before, str) or (before != known_body and fingerprint(before) != binding['body_baseline_id']):
             raise DeliveryPending('body_baseline_changed')
-        already_synced = binding['progress'].get('status') == 'synced'
+        close = next((op for op in reversed(operations) if op['kind'] == 'close'), None)
+        already_synced = (close is not None and close['status'] == 'confirmed'
+                          and close.get('expected_after') == {'state': 'closed', 'state_reason': 'completed'}
+                          and close.get('candidate_id') == binding['candidate_id']
+                          and close.get('delivery_sha') == progress['delivery']['sha'])  # Transient pending does not erase a confirmed closure of this exact accepted delivery.
         if already_synced and (before != known_body or issue.get('state') != 'closed' or issue.get('state_reason') != 'completed'
                                or set(issue.get('labels', [])) & set(config['remove_labels'])):
             raise DeliveryPending('remote_changed_after_sync')  # Never silently reclaim an externally changed closed ticket.
@@ -317,9 +326,7 @@ class IssueSync:
         def mutate(kind, previous, following, request, labels, next_state='open'):
             current_state = self._state(store)
             current_projection = store.acceptance_projection(binding['ticket_id'])
-            if (not self._enrolled(current_state) or current_state['status'] not in {'running', 'completed'}
-                    or not current_projection['eligible'] or current_projection.get('candidate_id') != binding['candidate_id']
-                    or current_projection.get('sources') != binding['source_references']):
+            if not self._qualification_matches(current_state, current_projection, binding):
                 raise DeliveryPending('qualification_changed_before_close' if kind == 'close' else 'qualification_changed_before_write')
             op = {'kind': kind, 'status': 'intent', 'expected_before': previous, 'expected_after': following,
                   'candidate_id': binding['candidate_id'], 'delivery_sha': progress['delivery']['sha']}
@@ -355,8 +362,7 @@ class IssueSync:
                 labels = following
         latest = self._state(store)
         projection = store.acceptance_projection(binding['ticket_id'])
-        if (not self._enrolled(latest) or latest['status'] not in {'running', 'completed'} or not projection['eligible']
-                or projection.get('candidate_id') != binding['candidate_id'] or projection.get('sources') != binding['source_references']):
+        if not self._qualification_matches(latest, projection, binding):
             raise DeliveryPending('qualification_changed_before_close')
         current_delivery = qualify_delivery(self.github, repository, config, binding, latest)
         if current_delivery['delivery'] != progress['delivery']:
@@ -426,9 +432,7 @@ class IssueSync:
             if delivery and delivery.get('delivery_eligible'):
                 latest_state = self._state(store)
                 latest_projection = store.acceptance_projection(binding['ticket_id'])  # Remote waits cannot freeze professional currentness.
-                if (not self._enrolled(latest_state) or latest_state['status'] not in {'running', 'completed'}
-                        or not latest_projection['eligible'] or latest_projection.get('candidate_id') != binding['candidate_id']
-                        or latest_projection.get('sources') != binding['source_references']):
+                if not self._qualification_matches(latest_state, latest_projection, binding):
                     reason, delivery = 'qualification_changed_during_read', None
             progress = {'status': 'pending', 'reason': reason,
                         'qualification_reason': projection.get('reason') if not projection['eligible'] else None,
@@ -437,7 +441,7 @@ class IssueSync:
                 progress.update(delivery)  # Qualification and successful remote synchronization remain distinct states.
             if progress.get('delivery_eligible'):
                 try:
-                    progress = self._write_body(store, journal, binding, progress, state)
+                    progress = self._synchronize_issue(store, journal, binding, progress, state)
                 except DeliveryPending as exc:
                     progress['reason'] = exc.reason  # A partial mutation remains pending until every readback matches.
                     if exc.retry_not_before is not None:

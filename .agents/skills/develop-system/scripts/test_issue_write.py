@@ -418,6 +418,135 @@ class IssueWriteTests(unittest.TestCase):
             self.assertEqual((result['status'], result['reason']), ('pending', 'delivery_qualified'))
             self.assertEqual(boundary.requests, [])  # An existing read-only connection does not acquire Issue-write capability.
 
+    def test_confirmed_sync_survives_temporary_missing_ci_without_rewriting(self):
+        store = self.ready()
+        original_run = store.path.read_bytes()
+        self.assertEqual(self.sync.sync_once(store)['status'], 'synced')
+        writes, body = copy.deepcopy(self.github.writes), self.github.issue['body']
+        jobs = self.github.jobs
+        self.github.jobs = []  # Lose current eligibility without changing any previously confirmed remote operation.
+        pending = self.sync.sync_once(store)
+        self.assertEqual((pending['status'], pending['reason']), ('pending', 'required_ci_missing_or_ambiguous'))
+        self.assertTrue(all(op['status'] == 'confirmed' for op in self.sync.status(store)['bindings'][0]['progress']['operations']))
+        self.github.jobs = jobs
+        self.assertEqual(self.sync.sync_once(store)['status'], 'synced')  # Use the same public object and freshly restored facts.
+        self.assertEqual(self.sync.sync_once(store)['status'], 'synced')
+        self.assertEqual(self.github.writes, writes)
+        self.assertEqual(self.github.issue['body'], body)
+        self.assertEqual(store.path.read_bytes(), original_run)
+
+    def test_confirmed_sync_survives_temporary_read_failure_without_rewriting(self):
+        from issue_delivery import DeliveryPending
+        store = self.ready()
+        self.assertEqual(self.sync.sync_once(store)['status'], 'synced')
+        writes, body, original_run = copy.deepcopy(self.github.writes), self.github.issue['body'], store.path.read_bytes()
+        reader = self.github.get_workflow_runs
+        def unavailable(*args):
+            raise DeliveryPending('remote_service_unavailable')  # Only the public external API boundary fails.
+        self.github.get_workflow_runs = unavailable
+        self.assertEqual(self.sync.sync_once(store)['reason'], 'remote_service_unavailable')
+        self.github.get_workflow_runs = reader
+        self.assertEqual(self.sync.sync_once(store)['status'], 'synced')
+        self.assertEqual(self.github.writes, writes)
+        self.assertEqual(self.github.issue['body'], body)
+        self.assertEqual(store.path.read_bytes(), original_run)
+
+    def confirmed_then_pending(self):
+        store = self.ready()
+        self.assertEqual(self.sync.sync_once(store)['status'], 'synced')
+        writes = copy.deepcopy(self.github.writes)
+        jobs = self.github.jobs
+        self.github.jobs = []
+        self.assertEqual(self.sync.sync_once(store)['reason'], 'required_ci_missing_or_ambiguous')
+        self.github.jobs = jobs
+        return store, writes  # Shared synthetic setup retains the same public object and real RunStore.
+
+    def test_confirmed_repeat_after_pending_preserves_an_external_reopen(self):
+        store, writes = self.confirmed_then_pending()
+        self.github.issue.update(state='open', state_reason='reopened')
+        result = self.sync.sync_once(store)
+        self.assertEqual((result['status'], result['reason']), ('pending', 'remote_changed_after_sync'))
+        self.assertEqual(self.github.writes, writes)
+        self.assertEqual(self.github.issue['state'], 'open')
+
+    def test_confirmed_repeat_after_pending_preserves_changed_remote_body(self):
+        store, writes = self.confirmed_then_pending()
+        self.github.issue['body'] += '\nHuman content'
+        self.assertEqual(self.sync.sync_once(store)['reason'], 'body_baseline_changed')
+        self.assertEqual(self.github.writes, writes)
+        self.assertTrue(self.github.issue['body'].endswith('Human content'))
+
+    def test_confirmed_repeat_after_pending_does_not_reclean_a_changed_label(self):
+        store, writes = self.confirmed_then_pending()
+        self.github.issue['labels'].append('ready-for-agent')
+        self.assertEqual(self.sync.sync_once(store)['reason'], 'remote_changed_after_sync')
+        self.assertEqual(self.github.writes, writes)
+        self.assertIn('ready-for-agent', self.github.issue['labels'])
+
+    def test_confirmed_repeat_after_pending_still_requires_current_acceptance(self):
+        store, writes = self.confirmed_then_pending()
+        original_run = store.path.read_bytes()
+        (self.project / 'candidate.py').write_text('value = 9  # Later unaccepted contents.\n', encoding='utf-8')
+        self.assertEqual(self.sync.sync_once(store)['reason'], 'acceptance_pending')
+        self.assertEqual(self.github.writes, writes)
+        self.assertEqual(store.path.read_bytes(), original_run)
+
+    def test_confirmed_closure_of_another_delivery_is_not_reused(self):
+        store, writes = self.confirmed_then_pending()
+        self.github.pull['merge_commit_sha'] = 'd' * 40
+        self.github.files['d' * 40] = copy.deepcopy(self.github.files['b' * 40])
+        self.github.runs[0]['head_sha'] = 'd' * 40
+        for job in self.github.jobs:
+            job['head_sha'] = 'd' * 40  # All current external delivery facts now qualify a different actual merged SHA.
+        result = self.sync.sync_once(store)
+        self.assertEqual(result['delivery']['sha'], 'd' * 40)
+        self.assertEqual((result['status'], result['reason']), ('pending', 'issue_not_open_or_fields_unavailable'))
+        self.assertEqual(self.github.writes, writes)
+
+    def test_manual_closed_issue_without_our_confirmed_close_is_not_claimed(self):
+        store = self.ready()
+        self.github.issue.update(state='closed', state_reason='completed')
+        result = self.sync.sync_once(store)
+        self.assertEqual((result['status'], result['reason']), ('pending', 'issue_not_open_or_fields_unavailable'))
+        self.assertEqual(self.github.writes, [])
+
+    def test_public_sync_http_repeat_recovers_fresh_facts_and_refreshes_same_summary(self):
+        store = self.ready()
+        original_run = store.path.read_bytes()
+        with MutationHTTP(self.github) as boundary:
+            self.sync = IssueSync(self.project, boundary)
+            self.assertEqual(self.sync.sync_once(store)['status'], 'synced')
+            jobs = self.github.jobs
+            self.github.jobs = []
+            self.assertEqual(self.sync.sync_once(store)['reason'], 'required_ci_missing_or_ambiguous')
+            self.github.jobs = jobs
+            self.assertEqual(self.sync.sync_once(store)['status'], 'synced')
+            self.assertEqual(len(self.github.writes), 3)
+            self.github.runs[0].update(id=202, run_number=2)
+            for job in self.github.jobs:
+                job['run_id'] = 202
+            self.assertEqual(self.sync.sync_once(store)['status'], 'synced')
+            self.assertEqual([kind for kind, _ in self.github.writes], ['body', 'label', 'close', 'body'])
+            self.assertEqual([request[0] for request in boundary.requests if request[0] != 'GET'], ['PATCH', 'DELETE', 'PATCH', 'PATCH'])
+        self.assertEqual(self.github.issue['body'].count('<!-- develop-system:issue-sync:'), 1)
+        self.assertIn('/actions/runs/202', self.github.issue['body'])
+        self.assertNotIn('/actions/runs/201', self.github.issue['body'])
+        self.assertEqual(store.path.read_bytes(), original_run)
+
+    def test_public_sync_http_repeat_survives_a_temporary_connection_failure(self):
+        store = self.ready()
+        with MutationHTTP(self.github) as boundary:
+            self.sync = IssueSync(self.project, boundary)
+            self.assertEqual(self.sync.sync_once(store)['status'], 'synced')
+            original_provider = boundary.adapter.token_provider
+            def unavailable(reference):
+                raise RuntimeError('synthetic unavailable provider')  # Test the outer round failure path without credentials or a private mock.
+            boundary.adapter.token_provider = unavailable
+            self.assertEqual(self.sync.sync_once(store)['reason'], 'connection_unavailable')
+            boundary.adapter.token_provider = original_provider
+            self.assertEqual(self.sync.sync_once(store)['status'], 'synced')
+            self.assertEqual([request[0] for request in boundary.requests if request[0] != 'GET'], ['PATCH', 'DELETE', 'PATCH'])
+
 
 if __name__ == '__main__':
     unittest.main()
