@@ -132,11 +132,11 @@ def validate_ticket_scopes(scopes, criteria, plan):
     return copy.deepcopy(scopes)
 
 
-def completion_qualification(state, criteria, checks, relevant, steps):
+def completion_qualification(state, criteria, checks, relevant, steps, *, necessary_steps=()):  # Ticket necessity can strengthen run-level optionality without changing the plan.
     """One qualification rule shared by whole-run completion and read-only ticket views."""
     if any(r['kind'] == 'system' for r in state['restrictions']):
         raise ValueError('Professional system restrictions remain unresolved')
-    if any(s['required'] and s['status'] != 'completed' for s in steps):
+    if any((s['required'] or s['step_id'] in necessary_steps) and s['status'] != 'completed' for s in steps):  # A ticket's complete dependency closure remains necessary even when globally optional.
         raise ValueError('Necessary scoped steps are unfinished')
     if any(not frame_resolved(f) for f in relevant):
         raise ValueError('Unresolved skill work or findings remain')
@@ -1302,7 +1302,7 @@ class RunStore:
                 if root_step_id(state, source['frame_id']) not in scope['required_steps']:
                     raise ValueError('Specialist conclusion belongs to another ticket work scope')
                 references.append({'id': criterion['id'], 'source_frame_id': source['frame_id']})
-            qualified = completion_qualification(state, criteria, references, relevant, steps)
+            qualified = completion_qualification(state, criteria, references, relevant, steps, necessary_steps=selected)  # Original complete keeps its existing optional-plan behavior.
             identity = [{'frame_id': f['frame_id'], 'input_version': f['input_version'], 'evidence': frame_evidence(f),
                          'ticket_candidates': f.get('ticket_candidates', {})} for f in relevant]
             return {'eligible': True, 'reason': None, 'run_id': self.run_id, 'ticket_id': ticket_id,

@@ -48,7 +48,7 @@ def configuration(project):
     if not path.exists():
         return None  # Absence is disabled and never initializes historical state.
     record = json.loads(path.read_text(encoding='utf-8'))
-    if (type(record.get('schema_version')) is not int or record['schema_version'] != 1
+    if (not isinstance(record, dict) or type(record.get('schema_version')) is not int or record['schema_version'] != 1  # Reject non-object records before accessing version fields.
             or record.get('project_key') != fingerprint(str(Path(project).resolve()))
             or not isinstance(record.get('generation'), str) or not record['generation']
             or not isinstance(record.get('enablement_reference'), str) or not record['enablement_reference'].strip()):
@@ -117,10 +117,13 @@ class IssueSync:
         if not path.exists():
             return {'schema_version': 1, 'project_key': fingerprint(str(self.project)), 'revision': 0, 'bindings': []}
         journal = json.loads(path.read_text(encoding='utf-8'))
-        if (type(journal.get('schema_version')) is not int or journal['schema_version'] != 1
+        if (not isinstance(journal, dict) or type(journal.get('schema_version')) is not int or journal['schema_version'] != 1  # The journal envelope follows the same typed version boundary.
                 or journal.get('project_key') != fingerprint(str(self.project)) or type(journal.get('revision')) is not int
                 or not isinstance(journal.get('bindings'), list)):
             raise ValueError('Unknown or foreign Issue sync journal')
+        if any(not isinstance(binding, dict) or type(binding.get('schema_version')) is not int
+                or binding['schema_version'] != 1 for binding in journal['bindings']):
+            raise ValueError('Unknown Issue sync binding version')  # Validate every nested record before any consumer exposes, selects or rewrites it.
         return journal  # This file contains remote progress and references, never professional verdicts.
 
     def _state(self, store):

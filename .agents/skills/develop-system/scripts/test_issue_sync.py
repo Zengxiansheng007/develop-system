@@ -133,6 +133,44 @@ class IssueSyncTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             store.complete(state['revision'], [{'id': '1', 'source_frame_id': state['frames'][0]['frame_id']}])
 
+    def test_ticket_required_optional_plan_step_remains_acceptance_pending(self):
+        self.sync.configure(self.config, user_reference='synthetic enablement')  # Enable only this disposable project.
+        self.plan.append({'step_id': 'necessary-ticket-review', 'skill_id': 'to-spec', 'required': False})  # Global optionality does not weaken original ticket necessity.
+        scope = self.scope()  # Fix the necessary closure at real run creation.
+        scope['required_steps'].append('necessary-ticket-review')  # This pending, undispatched step belongs to this ticket.
+        store, state = self.create(ticket_scopes=[scope])  # Use the public enrollment and original-scope boundary.
+        state = self.finish(store, state)  # Return only the first step through real professional receive.
+        before = store.path.read_bytes()  # Projection and synchronization must not rewrite execution authority.
+        projection = store.acceptance_projection('77:501')  # Observe the scoped public qualification.
+        self.assertFalse(projection['eligible'])  # The ticket still owes its explicitly necessary review.
+        self.assertIn('Necessary scoped steps are unfinished', projection['reason'])  # Expose an actionable pending reason.
+        binding = self.sync.bind(store, issue_number=15, final_pr={'number': 13, 'repository_id': 77},
+            acceptance_map={'1': {'text': 'verified behavior', 'context': ''}})  # Binding cannot freeze an unqualified candidate.
+        self.assertIsNone(binding['candidate_id'])  # No apparent accepted candidate is created.
+        self.assertEqual(self.sync.sync_once(store)['reason'], 'acceptance_pending')  # Keep delivery behind the same qualification gate.
+        self.assertEqual(store.path.read_bytes(), before)  # The side journal does not promote execution state.
+        state = store.complete(state['revision'], [{'id': '1', 'source_frame_id': state['frames'][0]['frame_id']}])  # Original whole-run optional-plan semantics stay compatible.
+        self.assertEqual(state['status'], 'completed')  # This shared API still ignores undispatched globally optional work.
+        self.assertFalse(store.acceptance_projection('77:501')['eligible'])  # Root completed cannot satisfy the ticket's stronger declaration.
+        self.assertEqual(self.github.writes, [])  # Neither pending nor completed states authorize remote mutations.
+
+    def test_ticket_required_optional_step_qualifies_after_its_real_return(self):
+        self.plan.append({'step_id': 'necessary-ticket-review', 'skill_id': 'to-spec', 'required': False})  # Necessity is declared only in this ticket's original scope.
+        scope = self.scope()  # Keep the original AC and input declarations unchanged.
+        scope['required_steps'].append('necessary-ticket-review')  # Require the additional professional step for this ticket.
+        store, state = self.create(ticket_scopes=[scope])  # Use actual temporary RunStore creation.
+        state = self.finish(store, state)  # The AC-producing step returns first.
+        self.assertFalse(store.acceptance_projection('77:501')['eligible'])  # Necessary review is still pending.
+        state = store.dispatch(state['revision'], 'to-spec', 'ticket-v1', 'necessary-ticket-review')  # Start the explicitly necessary optional plan step.
+        frame = state['frames'][-1]  # Use the identity actually dispatched by the public authority.
+        event = {'protocol_version': 1, 'event_id': frame['frame_id'] + '-result', 'run_id': store.run_id,
+                 'frame_id': frame['frame_id'], 'parent_frame_id': None, 'skill_id': 'to-spec', 'input_version': 'ticket-v1',
+                 'mode': 'skill', 'execution': 'sequential', 'status': 'completed', 'return_to': 'develop-system',
+                 'completion_checked': True, 'artifacts': [str(self.project / ('evidence-' + store.run_id + '.txt'))],
+                 'checks': [], 'findings': [], 'blockers': [], 'acceptance_checks': [], 'resolved_findings': []}  # A fresh protocol fixture carries no copied authority-generated candidate metadata or AC ownership.
+        store.receive(state['revision'], event)  # Only a real accepted return completes this plan step.
+        self.assertTrue(store.acceptance_projection('77:501')['eligible'])  # Completed necessary work removes the scoped pending condition.
+
     def test_findings_and_changed_evidence_block_the_same_shared_qualification(self):
         for run_id, changes in [('findings', {'findings': ['unresolved fixture finding']}), ('stale', {})]:
             store, state = self.create(run_id, ticket_scopes=[self.scope()])
@@ -331,6 +369,64 @@ class IssueSyncTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.sync.status(store)
         self.assertEqual(self.github.writes, [])
+
+    def test_unknown_binding_versions_are_rejected_by_every_public_consumer(self):
+        self.sync.configure(self.config, user_reference='synthetic enablement')  # Only temporary configuration is enabled.
+        store, _ = self.create(ticket_scopes=[self.scope()])  # Preserve the real authority separately from side records.
+        arguments = {'issue_number': 15, 'final_pr': {'number': 13, 'repository_id': 77},
+                     'acceptance_map': {'1': {'text': 'verified behavior', 'context': ''}}}  # Use the same legitimate original binding inputs.
+        self.sync.bind(store, **arguments)  # Obtain a real version-one journal through the public seam.
+        journal = self.sync.root / 'bindings.json'  # Corruption is persistence input, never a passed execution-state edit.
+        original = json.loads(journal.read_text(encoding='utf-8'))  # Keep all unrelated identity fields intact.
+        before = store.path.read_bytes()  # Unsupported records must not alter RunStore authority.
+        for version in (99, True, 1.0, '1', None):  # Python equality must not make bool/float current integer versions.
+            value = copy.deepcopy(original)  # Isolate one invalid version at a time.
+            value['bindings'][0]['schema_version'] = version  # Reproduce the independently reviewed nested-version gap.
+            journal.write_text(json.dumps(value), encoding='utf-8')  # Supply an unknown persisted binding through the actual file boundary.
+            journal_before = journal.read_bytes()  # Rejection must not silently adopt or rewrite the unknown record.
+            for consumer in (lambda: self.sync.status(), lambda: self.sync.status(store),
+                             lambda: self.sync.bind(store, **arguments), lambda: self.sync.sync_once(store)):
+                with self.subTest(version=version, consumer=consumer), self.assertRaisesRegex(ValueError, 'binding'):
+                    consumer()  # Every approved public reader must share the version gate.
+                self.assertEqual(journal.read_bytes(), journal_before)  # No side-state write occurs on rejection.
+        self.assertEqual(store.path.read_bytes(), before)  # Execution authority is unchanged by all rejected reads.
+        self.assertEqual(self.github.writes, [])  # No unknown version authorizes a remote operation.
+
+    def test_all_versioned_sync_records_reject_unknown_versions_and_nonobjects(self):
+        self.sync.configure(self.config, user_reference='synthetic enablement')  # Establish known-good persisted configuration.
+        store, _ = self.create(ticket_scopes=[self.scope()])  # Keep actual authority separate from corruption fixtures.
+        arguments = {'issue_number': 15, 'final_pr': {'number': 13, 'repository_id': 77},
+                     'acceptance_map': {'1': {'text': 'verified behavior', 'context': ''}}}  # Reuse valid public binding inputs.
+        self.sync.bind(store, **arguments)  # Create the legitimate journal and nested binding through the seam.
+        config_path, journal_path = self.sync.root / 'config.json', self.sync.root / 'bindings.json'  # Persistence inputs under this disposable project.
+        config_bytes, journal_bytes = config_path.read_bytes(), journal_path.read_bytes()  # Restore each case independently.
+        before = store.path.read_bytes()  # No failed reader may alter execution state.
+        for layer in ('configuration-record', 'configuration-value', 'journal', 'binding'):
+            for invalid in ({'schema_version': 99}, {'schema_version': True}, {'schema_version': 1.0},
+                            {'schema_version': '1'}, {}, None, [], 'unsupported'):
+                config_path.write_bytes(config_bytes)  # Reset only the temporary persistence fixture.
+                journal_path.write_bytes(journal_bytes)  # Keep all other valid inputs byte-identical.
+                path = config_path if layer.startswith('configuration') else journal_path  # Corrupt one versioned record only.
+                original = json.loads(path.read_text(encoding='utf-8'))  # Preserve identity fields when testing an invalid version.
+                target = original['configuration'] if layer == 'configuration-value' else original['bindings'][0] if layer == 'binding' else original  # Select the persisted schema layer.
+                replacement = {**target, **invalid} if isinstance(invalid, dict) else invalid  # Unknown versions retain unrelated valid fields.
+                if invalid == {}:
+                    replacement.pop('schema_version')  # An absent version is not current v1.
+                if layer == 'configuration-value':
+                    original['configuration'] = replacement  # Supply an invalid nested configuration schema.
+                elif layer == 'binding':
+                    original['bindings'][0] = replacement  # Supply an invalid nested binding schema.
+                else:
+                    original = replacement  # Supply an invalid versioned envelope.
+                path.write_text(json.dumps(original), encoding='utf-8')  # No execution state is manufactured by these inputs.
+                persisted = path.read_bytes()  # Rejection must preserve the unsupported input.
+                for name, consumer in (('status', lambda: self.sync.status()), ('bind', lambda: self.sync.bind(store, **arguments)),
+                                       ('sync_once', lambda: self.sync.sync_once(store))):
+                    with self.subTest(layer=layer, invalid=invalid, consumer=name), self.assertRaises(ValueError):
+                        consumer()  # Public consumers reject unknown semantics without an attribute/type crash.
+                    self.assertEqual(path.read_bytes(), persisted)  # No automatic replacement or migration occurs.
+        self.assertEqual(store.path.read_bytes(), before)  # Unknown records never become execution authority.
+        self.assertEqual(self.github.writes, [])  # The complete matrix remains zero remote writes.
 
     def test_candidate_ranges_apply_the_existing_sensitive_file_exclusion(self):
         (self.project / '.env').write_text('fixture-only-private-value', encoding='utf-8')
