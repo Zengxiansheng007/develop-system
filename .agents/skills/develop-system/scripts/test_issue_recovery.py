@@ -1,9 +1,12 @@
 """Interrupted synchronization through public interfaces; all remote facts are synthetic."""
 import copy
 import json
+import os
 from pathlib import Path
+import queue
 import subprocess
 import sys
+import threading
 import unittest
 
 from issue_sync import IssueSync
@@ -18,9 +21,10 @@ class Interrupted(BaseException):
 
 class PersistentGitHub(write_fixtures.WritableGitHub):
     """Disk-backed synthetic remote boundary shared by two real Python processes."""
-    def __init__(self, path, interrupt_kind=None, phase=None):
+    def __init__(self, path, interrupt_kind=None, phase=None, *, hard_exit=False):
         super().__init__()
         self.path, self.interrupt_kind, self.phase = Path(path), interrupt_kind, phase
+        self.hard_exit = hard_exit  # Actual process death must skip the product's finally blocks.
         self.trace, self.last_write = [], None
         if self.path.exists():
             value = json.loads(self.path.read_text(encoding='utf-8'))
@@ -29,22 +33,31 @@ class PersistentGitHub(write_fixtures.WritableGitHub):
     def publish(self):
         self.path.write_text(json.dumps({'issue': self.issue, 'writes': self.writes, 'trace': self.trace}), encoding='utf-8')  # Only external fixture facts, never execution authority.
 
+    def stop(self):
+        if self.hard_exit:
+            os._exit(82)  # Terminate only this test-owned child, preserving the external fixture's applied facts.
+        raise SystemExit(82)
+
     def get_issue(self, repository, number):
         self.trace.append('read')
         self.publish()
         if self.last_write == self.interrupt_kind and self.phase == 'before-receipt':
-            raise SystemExit(82)  # Remote read succeeded, local confirmation has not been published.
+            self.stop()  # Remote read succeeded, local confirmation has not been published.
         return super().get_issue(repository, number)
 
     def perform(self, kind, action):
         if kind == self.interrupt_kind and self.phase == 'before':
-            raise SystemExit(82)  # Durable intent exists; request may not have left this process.
+            self.stop()  # Durable intent exists; request may not have left this process.
         action()
         self.trace.append(kind)
         self.last_write = kind
         self.publish()
+        if kind == self.interrupt_kind and self.phase == 'hold':
+            print('holding', flush=True)  # Parent observes a live public sync owner without polling its journal.
+            if sys.stdin.readline().strip() != 'continue':
+                raise SystemExit(84)
         if kind == self.interrupt_kind and self.phase == 'after':
-            raise SystemExit(82)  # Request effect is durable at the external boundary.
+            self.stop()  # Request effect is durable at the external boundary.
         return copy.deepcopy(self.issue)
 
     def update_issue_body(self, repository, number, body):
@@ -63,6 +76,134 @@ class IssueRecoveryTests(unittest.TestCase):
     scope = write_fixtures.IssueWriteTests.scope
     finish = write_fixtures.IssueWriteTests.finish
     ready = write_fixtures.IssueWriteTests.ready
+
+    def test_hard_exit_after_body_recovers_in_a_new_process_without_authority_changes(self):
+        store = self.ready()  # Synthetic specialist conclusions pass through real temporary RunStore.
+        state = store.read()
+        store.complete(state['revision'], [{'id': '1', 'source_frame_id': state['frames'][0]['frame_id']}])
+        original = {p.relative_to(self.project): p.read_bytes() for p in self.project.rglob('*')
+                    if p.is_file() and 'issue-sync' not in p.parts}
+        remote_path = self.project / 'synthetic-remote.json'
+        PersistentGitHub(remote_path).publish()
+        crashed = subprocess.run([sys.executable, '-B', __file__, '--hard-interrupt', str(self.project), str(remote_path), 'body', 'after'],
+            capture_output=True, text=True, timeout=30)  # os._exit bypasses lock cleanup in this actual independent interpreter.
+        self.assertEqual(crashed.returncode, 82, crashed.stderr)
+        before = PersistentGitHub(remote_path)
+        self.assertEqual([item[0] for item in before.writes], ['body'])
+        source = self.project / 'candidate.py'
+        accepted = source.read_bytes()
+        source.write_bytes(b'changed = True  # Synthetic later unaccepted candidate.\n')
+        denied = subprocess.run([sys.executable, '-B', __file__, '--continue', str(self.project), str(remote_path)],
+            capture_output=True, text=True, timeout=30)  # Completed status and abandoned ownership cannot waive current accepted-source checks.
+        self.assertEqual(denied.returncode, 0, denied.stderr)
+        self.assertEqual(json.loads(denied.stdout)['reason'], 'acceptance_pending')
+        self.assertEqual(PersistentGitHub(remote_path).writes, before.writes)
+        source.write_bytes(accepted)
+        continued = subprocess.run([sys.executable, '-B', __file__, '--continue', str(self.project), str(remote_path)],
+            capture_output=True, text=True, timeout=30)  # A second fresh interpreter uses only public continuation and persisted facts.
+        self.assertEqual(continued.returncode, 0, continued.stderr)
+        result = json.loads(continued.stdout)
+        self.assertEqual(result['status'], 'synced')
+        remote = PersistentGitHub(remote_path)
+        self.assertEqual(remote.trace[len(before.trace)], 'read')
+        self.assertEqual([item[0] for item in remote.writes], ['body', 'label', 'close'])
+        self.assertEqual(remote.issue['body'].count('<!-- develop-system:issue-sync:'), 1)
+        self.assertTrue(all((self.project / name).read_bytes() == value for name, value in original.items()))
+
+    def test_hard_exit_other_request_windows_preserve_unknown_or_missing_steps(self):
+        for kind in ('body', 'label', 'close'):
+            for phase in ('before', 'after', 'before-receipt'):
+                if (kind, phase) == ('body', 'after'):
+                    continue  # The completed-run/source-currentness test owns this already covered window.
+                with self.subTest(kind=kind, phase=phase):
+                    self.setUp()
+                    store = self.ready()
+                    original = {p.relative_to(self.project): p.read_bytes() for p in self.project.rglob('*')
+                                if p.is_file() and 'issue-sync' not in p.parts}
+                    remote_path = self.project / 'synthetic-remote.json'
+                    PersistentGitHub(remote_path).publish()
+                    child = subprocess.run([sys.executable, '-B', __file__, '--hard-interrupt', str(self.project), str(remote_path), kind, phase],
+                        capture_output=True, text=True, timeout=30)
+                    self.assertEqual(child.returncode, 82, child.stderr)
+                    before = PersistentGitHub(remote_path)
+                    for attempt in range(2):
+                        previous = PersistentGitHub(remote_path)
+                        child = subprocess.run([sys.executable, '-B', __file__, '--continue', str(self.project), str(remote_path)],
+                            capture_output=True, text=True, timeout=30)  # Every recovery/replay uses another actual interpreter.
+                        self.assertEqual(child.returncode, 0, child.stderr)
+                        result = json.loads(child.stdout)
+                        remote = PersistentGitHub(remote_path)
+                        self.assertEqual(remote.trace[len(previous.trace)], 'read')
+                        if phase == 'before' or kind == 'close':
+                            self.assertEqual(result['status'], 'pending')
+                            self.assertIn(result['reason'], ('operation_outcome_unknown', 'close_outcome_unknown'))
+                            self.assertEqual(remote.writes, before.writes)  # Hard death supplies no permission to resend unknown requests.
+                        else:
+                            self.assertEqual(result['status'], 'synced')
+                            self.assertEqual([item[0] for item in remote.writes], ['body', 'label', 'close'])
+                        self.assertLessEqual(remote.issue['body'].count('<!-- develop-system:issue-sync:'), 1)
+                    self.assertTrue(all((self.project / name).read_bytes() == value for name, value in original.items()))
+
+    def test_live_process_owner_is_not_reclaimed_by_a_concurrent_public_continuation(self):
+        store = self.ready()
+        original = store.path.read_bytes()
+        remote_path = self.project / 'synthetic-remote.json'
+        PersistentGitHub(remote_path).publish()
+        child = subprocess.Popen([sys.executable, '-B', __file__, '--hold', str(self.project), str(remote_path), 'body', 'hold'],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            ready = queue.Queue()
+            threading.Thread(target=lambda: ready.put(child.stdout.readline()), daemon=True).start()
+            self.assertEqual(ready.get(timeout=20), 'holding\n')  # Bounded readiness receipt, no guessed sleep or process enumeration.
+            self.assertIsNone(child.poll())
+            lock = self.project / '.develop-system/issue-sync/.sync.lock'
+            owner = lock.read_bytes()
+            remote = PersistentGitHub(remote_path)
+            before = (copy.deepcopy(remote.writes), copy.deepcopy(remote.trace))
+            result = IssueSync(self.project, remote).continue_sync(store)
+            self.assertEqual((result['status'], result['reason']), ('pending', 'local_lock_unavailable'))
+            self.assertEqual(lock.read_bytes(), owner)
+            self.assertEqual((remote.writes, remote.trace), before)
+            self.assertTrue(Path(result['pending_record']).is_file())
+            output, errors = child.communicate('continue\n', timeout=30)
+            self.assertEqual(child.returncode, 0, errors)
+            self.assertEqual([item[0] for item in PersistentGitHub(remote_path).writes], ['body', 'label', 'close'])
+            self.assertEqual(store.path.read_bytes(), original)
+        finally:
+            if child.poll() is None:
+                child.kill()  # Only a failed test's own blocked fixture is stopped; no foreign process is touched.
+            child.communicate(timeout=10)
+
+    def test_confirmed_effect_reversal_before_close_is_not_repeated(self):
+        for field in ('label', 'body'):
+            with self.subTest(field=field):
+                self.setUp()
+                store = self.ready()
+                original_run, original_body = store.path.read_bytes(), self.github.issue['body']
+                reader = self.github.get_pull_request
+                def interrupt_before_close(*args):
+                    if len(self.github.writes) >= 2:
+                        raise Interrupted()  # Interrupt public final delivery qualification after both confirmations, before close intent.
+                    return reader(*args)
+                self.github.get_pull_request = interrupt_before_close
+                with self.assertRaises(Interrupted):
+                    self.sync.sync_once(store)
+                self.github.get_pull_request = reader
+                operations = copy.deepcopy(self.sync.status(store)['bindings'][0]['progress']['operations'])
+                self.assertEqual([(op['kind'], op['status']) for op in operations], [('body', 'confirmed'), ('label', 'confirmed')])
+                if field == 'label':
+                    self.github.issue['labels'].append('ready-for-agent')  # Synthetic human restoration after a positively confirmed removal.
+                else:
+                    self.github.issue['body'] = original_body  # Restoring the binding baseline is still an observable reversal of confirmed body work.
+                external = copy.deepcopy(self.github.issue)
+                writes = copy.deepcopy(self.github.writes)
+                for attempt in range(2):
+                    result = IssueSync(self.project, self.github).continue_sync(store)
+                    self.assertEqual(result['status'], 'pending')
+                    self.assertEqual(result['operations'], operations)  # Historical confirmation remains a fact, not a fresh retry permission.
+                    self.assertEqual(self.github.issue, external)
+                    self.assertEqual(self.github.writes, writes)
+                    self.assertEqual(store.path.read_bytes(), original_run)
 
     def test_new_instance_confirms_applied_body_and_only_sends_missing_steps(self):
         store = self.ready()  # Real temporary authority receives synthetic specialist results.
@@ -94,14 +235,25 @@ class IssueRecoveryTests(unittest.TestCase):
             self.assertEqual((self.project / name).read_bytes(), contents)
 
     def test_lock_conflict_is_durable_local_pending_without_unlock_or_remote_requests(self):
-        store = self.ready()
-        lock = self.project / '.develop-system/issue-sync/.sync.lock'
-        lock.write_bytes(b'another-process')  # A persisted foreign owner is never forcibly cleared.
-        result = self.sync.sync_once(store)
-        self.assertEqual((result['status'], result['reason']), ('pending', 'local_lock_unavailable'))
-        self.assertEqual(lock.read_bytes(), b'another-process')
-        self.assertEqual(json.loads(Path(result['pending_record']).read_text(encoding='utf-8'))['reason'], 'local_lock_unavailable')
-        self.assertEqual(self.github.writes, [])
+        for owner in (b'another-process', b'0' * 32, b'', b'develop-system:issue-sync-lock:v2:' + b'0' * 32,
+                      b'develop-system:issue-sync-lock:v1:partial'):
+            with self.subTest(owner=owner):
+                self.setUp()
+                store = self.ready()
+                lock = self.project / '.develop-system/issue-sync/.sync.lock'
+                lock.write_bytes(owner)  # Unknown, legacy and incomplete owner formats carry no safe recovery authority.
+                reader = self.github.get_pull_request
+                requests = []
+                def observe(*args):
+                    requests.append('read')
+                    return reader(*args)
+                self.github.get_pull_request = observe
+                result = self.sync.sync_once(store)
+                self.assertEqual((result['status'], result['reason']), ('pending', 'local_lock_unavailable'))
+                self.assertEqual(lock.read_bytes(), owner)
+                self.assertEqual(json.loads(Path(result['pending_record']).read_text(encoding='utf-8'))['reason'], 'local_lock_unavailable')
+                self.assertEqual(self.github.writes, [])
+                self.assertEqual(requests, [])
 
     def test_separate_process_before_after_and_before_receipt_each_request(self):
         for kind in ('body', 'label', 'close'):
@@ -314,8 +466,14 @@ class IssueRecoveryTests(unittest.TestCase):
 
 
 if __name__ == '__main__':
-    if len(sys.argv) > 1 and sys.argv[1] == '--interrupt':
+    if len(sys.argv) > 1 and sys.argv[1] in {'--interrupt', '--hard-interrupt', '--hold'}:
         project, remote, kind, phase = sys.argv[2:]
-        IssueSync(project, PersistentGitHub(remote, kind, phase)).sync_once(RunStore(project, 'new-run'))
+        IssueSync(project, PersistentGitHub(remote, kind, phase, hard_exit=sys.argv[1] == '--hard-interrupt')).sync_once(RunStore(project, 'new-run'))
+        if sys.argv[1] == '--hold':
+            raise SystemExit(0)  # The owned active-lock fixture finishes normally after the parent releases it.
         raise SystemExit(83)  # Failure to reach the intended interruption is a test failure.
+    if len(sys.argv) > 1 and sys.argv[1] == '--continue':
+        project, remote = sys.argv[2:]
+        print(json.dumps(IssueSync(project, PersistentGitHub(remote)).continue_sync(RunStore(project, 'new-run'))))
+        raise SystemExit(0)
     unittest.main()  # Public script entry supplies managed source-loading evidence.

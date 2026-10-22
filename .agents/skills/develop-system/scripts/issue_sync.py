@@ -2,6 +2,7 @@
 from contextlib import contextmanager
 from contextlib import nullcontext
 import copy
+import errno
 import hashlib
 import json
 import math
@@ -86,14 +87,40 @@ class IssueSync:
     def _locked(self):
         self.root.mkdir(parents=True, exist_ok=True)
         lock = self.root / '.sync.lock'
-        owner = uuid.uuid4().hex.encode('ascii')
-        with lock.open('xb') as stream:
-            stream.write(owner)  # Existing locks fail closed; no forced unlock.
-        try:
-            yield
-        finally:
-            if lock.exists() and lock.read_bytes() == owner:
-                lock.unlink()  # Never remove another writer's lock.
+        owner = b'develop-system:issue-sync-lock:v1:' + uuid.uuid4().hex.encode('ascii')
+        with (self.root / '.sync.guard').open('a+b') as guard:  # Keep one stable inode; never unlink a guard another caller may have opened.
+            guard.seek(0)
+            try:
+                if os.name == 'nt':
+                    import msvcrt
+                    msvcrt.locking(guard.fileno(), msvcrt.LK_NBLCK, 1)  # Nonblocking byte-range ownership also works on an empty file.
+                else:
+                    import fcntl
+                    fcntl.flock(guard.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as exc:
+                if exc.errno in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
+                    raise FileExistsError('Issue synchronization has an active owner') from None
+                raise  # Unsupported/failed filesystem locking never grants ownership.
+            try:
+                if lock.exists():
+                    if lock.is_symlink() or not re.fullmatch(rb'develop-system:issue-sync-lock:v1:[0-9a-f]{32}', lock.read_bytes()):
+                        raise FileExistsError('Unknown or legacy Issue synchronization owner')  # PID and age cannot prove a foreign owner dead.
+                    lock.unlink()  # This versioned owner must hold our acquired OS guard while alive; its leftover marker is now abandoned.
+                with lock.open('xb') as stream:
+                    stream.write(owner)
+                    stream.flush()
+                    os.fsync(stream.fileno())  # Publish recognizable ownership before journal changes or external effects.
+                try:
+                    yield
+                finally:
+                    if lock.exists() and not lock.is_symlink() and lock.read_bytes() == owner:
+                        lock.unlink()  # Never remove an unknown replacement marker.
+            finally:
+                guard.seek(0)
+                if os.name == 'nt':
+                    msvcrt.locking(guard.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    fcntl.flock(guard.fileno(), fcntl.LOCK_UN)  # Process death also releases OS ownership without running finally.
 
     def _save(self, path, value):
         temporary = path.with_name('.' + uuid.uuid4().hex + '.tmp')
@@ -291,7 +318,7 @@ class IssueSync:
     def _reconcile_operations(self, journal, binding, progress, issue, *, explicit_continue=False):
         for op in progress['operations']:
             if op['status'] == 'confirmed':
-                continue  # Already confirmed effects still face the ordinary full remote readback.
+                continue  # Current effects are checked together below; a newer confirmed summary supersedes an older body value.
             if op['status'] == 'failed':
                 if op.get('retry_authorized'):
                     continue  # The original definitive rejection remains immutable history.
@@ -335,7 +362,8 @@ class IssueSync:
         before = issue.get('body')
         body_operations = [op for op in operations if op['kind'] == 'body' and op['status'] == 'confirmed']
         known_body = body_operations[-1]['expected_after'] if body_operations else None
-        if not isinstance(before, str) or (before != known_body and fingerprint(before) != binding['body_baseline_id']):
+        if (not isinstance(before, str) or (body_operations and before != known_body)
+                or (not body_operations and fingerprint(before) != binding['body_baseline_id'])):
             raise DeliveryPending('body_baseline_changed')
         close = next((op for op in reversed(operations) if op['kind'] == 'close'), None)
         already_synced = (close is not None and close['status'] == 'confirmed'
@@ -348,6 +376,8 @@ class IssueSync:
         expected_state = 'closed' if already_synced else 'open'
         if issue.get('state') != expected_state or not isinstance(issue.get('labels'), list) or any(not isinstance(v, str) for v in issue['labels']):
             raise DeliveryPending('issue_not_open_or_fields_unavailable')
+        if any(op['kind'] == 'label' and op['status'] == 'confirmed' and op['expected_after']['name'] in issue['labels'] for op in operations):
+            raise DeliveryPending('confirmed_operation_reversed')  # A restored confirmed removal is external change, never another missing step.
         try:
             expected = self._body(binding, state, before, progress['delivery'])
         except ValueError:
