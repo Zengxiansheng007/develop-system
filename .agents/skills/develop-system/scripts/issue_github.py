@@ -1,4 +1,4 @@
-"""Narrow read-only GitHub REST adapter for fixed PR contents and Actions attempts."""
+"""Narrow GitHub REST adapter for fixed delivery reads and scoped Issue mutations."""
 import base64
 from contextlib import contextmanager
 from email.utils import parsedate_to_datetime
@@ -20,10 +20,11 @@ from issue_delivery import DeliveryPending
 class BoundedHTTPTransport:
     """A disposable standard-library worker bounds DNS, TLS and slow streaming together."""
     def __call__(self, request, *, timeout, max_bytes):
-        if request.get_method() != 'GET' or request.data is not None:
-            raise DeliveryPending('http_write_not_supported')  # This ticket exposes no mutation transport.
+        if request.get_method() not in {'GET', 'PATCH', 'DELETE'} or (request.get_method() != 'PATCH' and request.data is not None):
+            raise DeliveryPending('http_method_not_supported')  # No comments, merges or unrestricted verbs enter this transport.
         started = time.monotonic()
         payload = json.dumps({'url': request.full_url, 'headers': dict(request.header_items()),
+                              'method': request.get_method(), 'data': base64.b64encode(request.data).decode('ascii') if request.data is not None else None,
                               'timeout': timeout, 'max_bytes': max_bytes}).encode('utf-8')
         process = None
         try:
@@ -61,7 +62,8 @@ def http_worker():
             return None  # No credential-bearing request follows even a same-origin redirect implicitly.
     try:
         payload = json.loads(sys.stdin.buffer.read())
-        request = Request(payload['url'], headers=payload['headers'], method='GET')
+        request = Request(payload['url'], headers=payload['headers'], method=payload['method'],
+                          data=base64.b64decode(payload['data'], validate=True) if payload['data'] is not None else None)
         try:
             response = build_opener(NoRedirect()).open(request, timeout=payload['timeout'])
         except HTTPError as error:
@@ -116,15 +118,18 @@ class GitHubReadAdapter:
         finally:
             self.token, self.deadline = None, None  # Do not retain a credential after an operation.
 
-    def _request(self, url):
+    def _request(self, url, *, method='GET', data=None):
         remaining = self.deadline - self.clock()
         if remaining <= 0:
             raise DeliveryPending('http_round_deadline')
         if self.requests >= self.max_requests:
             raise DeliveryPending('http_request_budget_exhausted')
         self.requests += 1
-        request = Request(url, headers={'Authorization': 'Bearer ' + self.token, 'Accept': 'application/vnd.github+json',
-                                       'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'develop-system'}, method='GET')
+        headers = {'Authorization': 'Bearer ' + self.token, 'Accept': 'application/vnd.github+json',
+                   'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'develop-system'}
+        if data is not None:
+            headers['Content-Type'] = 'application/json; charset=utf-8'  # Explicit UTF-8 preserves exact original Markdown.
+        request = Request(url, headers=headers, method=method, data=data)
         if self.transport is None:
             raise DeliveryPending('connection_transport_unavailable')
         try:
@@ -244,9 +249,14 @@ class GitHubReadAdapter:
 
     def get_issue(self, repository, number):
         value = self._get(repository, '/issues/' + self._number(number))
+        labels = value.get('labels')
+        labels = ([label['name'] for label in labels] if isinstance(labels, list)
+                  and all(isinstance(label, dict) and isinstance(label.get('name'), str) and label['name'] for label in labels) else None)
         return {'id': value.get('id'), 'number': value.get('number'), 'repository_id': repository['id'],
                 'repository_full_name': repository['full_name'], 'type': 'pull_request' if 'pull_request' in value else 'issue',
-                'body': value.get('body')}
+                'body': value.get('body'), 'state': value.get('state'), 'state_reason': value.get('state_reason'),
+                'labels': labels,  # Missing/malformed fields remain unknown instead of proving an empty remote set.
+                'title': value.get('title'), 'assignees': value.get('assignees'), 'milestone': value.get('milestone')}
 
     def get_pull_request(self, repository, number):
         value = self._get(repository, '/pulls/' + self._number(number))
@@ -304,6 +314,34 @@ class GitHubReadAdapter:
         if not isinstance(sha, str) or not re.fullmatch('[0-9a-f]{40}', sha):
             raise DeliveryPending('remote_commit_mismatch')
         return sha
+
+
+class GitHubIssueAdapter(GitHubReadAdapter):
+    """Explicit Issue-write capability; existing read-only clients keep their original surface."""
+    def _mutate(self, repository, number, *, method, value=None, label=None):
+        if self.deadline is None:
+            with self.round(self.connection_reference):
+                return self._mutate(repository, number, method=method, value=value, label=label)
+        suffix = '/issues/' + self._number(number)
+        if label is not None:
+            if not isinstance(label, str) or not label.strip():
+                raise DeliveryPending('remote_label_invalid')
+            suffix += '/labels/' + quote(label, safe='')  # One encoded name cannot become an endpoint or replace the label set.
+        url = 'https://api.github.com' + self._path(repository, suffix)
+        data = json.dumps(value, ensure_ascii=False).encode('utf-8') if value is not None else None
+        result, _ = self._request(url, method=method, data=data)
+        return result  # The caller independently reads actual Issue fields before confirming progress.
+
+    def update_issue_body(self, repository, number, body):
+        if not isinstance(body, str):
+            raise DeliveryPending('remote_body_invalid')
+        return self._mutate(repository, number, method='PATCH', value={'body': body})
+
+    def remove_issue_label(self, repository, number, name):
+        return self._mutate(repository, number, method='DELETE', label=name)
+
+    def close_issue(self, repository, number):
+        return self._mutate(repository, number, method='PATCH', value={'state': 'closed', 'state_reason': 'completed'})
 
 
 if __name__ == '__main__' and sys.argv[1:] == ['--http-worker']:

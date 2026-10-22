@@ -115,7 +115,7 @@ def qualify_ci(github, repository, config, sha):
 
 def qualify_delivery(github, repository, config, binding, state):
     try:
-        with github.round(config['connection_reference']) if hasattr(github, 'round') else nullcontext():
+        with github.round(config['connection_reference']) if hasattr(github, 'round') and getattr(github, 'deadline', None) is None else nullcontext():
             return _qualify_delivery(github, repository, config, binding, state)  # One deadline covers all related reads.
     except (KeyError, TypeError, ValueError, AttributeError):
         raise DeliveryPending('remote_material_invalid') from None  # Malformed remote data never escapes as a success or raw diagnostic.

@@ -245,7 +245,148 @@ class IssueSync:
         return {'schema_version': 1, 'enabled': bool(record and record['configuration']['enabled']),
                 'generation': record['generation'] if record else None, 'bindings': copy.deepcopy(bindings)}
 
+    def _body(self, binding, state, body, delivery):
+        mapping = {key: {k: item[k] for k in ('text', 'context')} for key, item in binding['mapping'].items()}
+        self._mapping(mapping, binding['scope'], body, self._acceptance_source(state, binding['scope'], body))  # Revalidate unique text/context against current complete ACs.
+        for item in mapping.values():
+            body = re.sub(r'(?m)^([ \t]*[-*] \[)[ xX](\] ' + re.escape(item['text']) + r'\r?)$', r'\g<1>x\2', body)
+        repository = binding['issue']['repository_full_name']
+        evidence_hashes = set()
+        for source in binding['source_references']:
+            event = next(e for e in reversed(state['events']) if e['frame_id'] == source['source_frame_id'])
+            check = next(c for c in event['acceptance_checks'] if c['id'] == source['id'])
+            evidence_hashes.update(e['sha256'] for e in check['evidence'])  # Export accepted evidence fingerprints, never private paths or file contents.
+        start = '<!-- develop-system:issue-sync:' + binding['binding_id'] + ' -->'
+        end = '<!-- /develop-system:issue-sync:' + binding['binding_id'] + ' -->'
+        summary = [start, '### Verified delivery', 'Accepted criteria: ' + ', '.join(binding['scope']['acceptance_ids']),
+                   'Acceptance provenance SHA256: `' + binding['candidate_id'] + '`',
+                   'Accepted evidence SHA256: ' + ', '.join('`' + value + '`' for value in sorted(evidence_hashes)),
+                   'Final PR: https://github.com/' + repository + '/pull/' + str(delivery['pr_number']),
+                   'Delivered SHA: `' + delivery['sha'] + '`']
+        summary += ['Required CI: ' + ci['job'] + ' — success; ' + ci['url'] for ci in delivery['ci']]
+        summary += ['Synchronization: allowed body verified; closure requires final requalification.', end]
+        section = '\n'.join(summary)
+        if start in body or end in body:
+            if body.count(start) != 1 or body.count(end) != 1 or body.index(start) >= body.index(end):
+                raise ValueError('Ambiguous managed summary')
+            return body[:body.index(start)] + section + body[body.index(end) + len(end):]
+        return body + '\n\n' + section  # No comments or unrelated body fields are generated.
+
+    def _publish_progress(self, journal, binding, progress):
+        binding['progress'] = copy.deepcopy(progress)
+        journal['revision'] += 1
+        self._save(self.root / 'bindings.json', journal)  # Durable progress is independent of execution authority.
+
+    def _write_body(self, store, journal, binding, progress, state):
+        config = configuration(self.project)['configuration']
+        repository, number = config['repository'], binding['issue']['number']
+        if not all(callable(getattr(self.github, name, None)) for name in ('update_issue_body', 'remove_issue_label', 'close_issue')):
+            return progress  # Existing read-only clients remain qualification-only.
+        operations = copy.deepcopy(binding['progress'].get('operations', []))
+        progress['operations'] = operations
+        if any(op['status'] != 'confirmed' for op in operations):
+            reason = 'previous_request_failed' if all(op['status'] in {'failed', 'confirmed'} for op in operations) else 'operation_outcome_unknown'
+            raise DeliveryPending(reason)  # Keep definitive rejection distinct from an ambiguous response; recovery remains a separate slice.
+        issue = self.github.get_issue(repository, number)
+        if self._identity(issue, number, repository, 'issue') != binding['issue']:
+            raise DeliveryPending('issue_identity_changed')
+        before = issue.get('body')
+        body_operations = [op for op in operations if op['kind'] == 'body']
+        known_body = body_operations[-1]['expected_after'] if body_operations else None
+        if not isinstance(before, str) or (before != known_body and fingerprint(before) != binding['body_baseline_id']):
+            raise DeliveryPending('body_baseline_changed')
+        already_synced = binding['progress'].get('status') == 'synced'
+        if already_synced and (before != known_body or issue.get('state') != 'closed' or issue.get('state_reason') != 'completed'
+                               or set(issue.get('labels', [])) & set(config['remove_labels'])):
+            raise DeliveryPending('remote_changed_after_sync')  # Never silently reclaim an externally changed closed ticket.
+        expected_state = 'closed' if already_synced else 'open'
+        if issue.get('state') != expected_state or not isinstance(issue.get('labels'), list) or any(not isinstance(v, str) for v in issue['labels']):
+            raise DeliveryPending('issue_not_open_or_fields_unavailable')
+        try:
+            expected = self._body(binding, state, before, progress['delivery'])
+        except ValueError:
+            raise DeliveryPending('body_mapping_changed') from None
+        def read(expected_body, expected_labels, expected_state=expected_state):
+            current = self.github.get_issue(repository, number)
+            if self._identity(current, number, repository, 'issue') != binding['issue']:
+                raise DeliveryPending('issue_identity_changed')
+            if current.get('body') != expected_body or sorted(current.get('labels', [])) != sorted(expected_labels) or current.get('state') != expected_state:
+                raise DeliveryPending('issue_readback_mismatch')
+            return current  # Every subsequent write uses a fresh matching observation.
+
+        def mutate(kind, previous, following, request, labels, next_state='open'):
+            current_state = self._state(store)
+            current_projection = store.acceptance_projection(binding['ticket_id'])
+            if (not self._enrolled(current_state) or current_state['status'] not in {'running', 'completed'}
+                    or not current_projection['eligible'] or current_projection.get('candidate_id') != binding['candidate_id']
+                    or current_projection.get('sources') != binding['source_references']):
+                raise DeliveryPending('qualification_changed_before_close' if kind == 'close' else 'qualification_changed_before_write')
+            op = {'kind': kind, 'status': 'intent', 'expected_before': previous, 'expected_after': following,
+                  'candidate_id': binding['candidate_id'], 'delivery_sha': progress['delivery']['sha']}
+            operations.append(op)
+            self._publish_progress(journal, binding, progress)  # Persist exact intent and source before any external request.
+            try:
+                request()
+            except DeliveryPending as exc:
+                op['status'] = 'unknown' if exc.reason.startswith(('http_', 'remote_service')) else 'failed'
+                op['reason'] = exc.reason
+                raise
+            except Exception:
+                op['status'] = 'unknown'
+                raise DeliveryPending('remote_write_outcome_unknown') from None
+            actual = read(expected, labels, next_state)
+            if next_state == 'closed' and actual.get('state_reason') != 'completed':
+                raise DeliveryPending('close_reason_readback_mismatch')
+            op['status'] = 'confirmed'
+            self._publish_progress(journal, binding, progress)  # Dependent writes wait for actual readback confirmation.
+
+        labels = list(issue['labels'])
+        read(before, labels)  # Re-read immediately before the first intent, rather than trust the binding snapshot.
+        if before != expected:
+            mutate('body', before, expected, lambda: self.github.update_issue_body(repository, number, expected), labels, expected_state)
+        if already_synced:
+            return {**progress, 'status': 'synced', 'reason': 'remote_verified'}  # Refresh the same stable summary without another close request.
+        for name in config['remove_labels']:
+            if name in labels:
+                read(expected, labels)
+                following = [label for label in labels if label != name]
+                mutate('label', {'name': name, 'present': True}, {'name': name, 'present': False},
+                       lambda name=name: self.github.remove_issue_label(repository, number, name), following)
+                labels = following
+        latest = self._state(store)
+        projection = store.acceptance_projection(binding['ticket_id'])
+        if (not self._enrolled(latest) or latest['status'] not in {'running', 'completed'} or not projection['eligible']
+                or projection.get('candidate_id') != binding['candidate_id'] or projection.get('sources') != binding['source_references']):
+            raise DeliveryPending('qualification_changed_before_close')
+        current_delivery = qualify_delivery(self.github, repository, config, binding, latest)
+        if current_delivery['delivery'] != progress['delivery']:
+            raise DeliveryPending('delivery_changed_before_close')
+        read(expected, labels)
+        mutate('close', {'state': 'open'}, {'state': 'closed', 'state_reason': 'completed'},
+               lambda: self.github.close_issue(repository, number), labels, 'closed')
+        return {**progress, 'status': 'synced', 'reason': 'remote_verified'}
+
     def sync_once(self, store, *, ticket_id=None):
+        state = self._state(store)
+        if not self._enrolled(state):
+            return {'status': 'unmanaged', 'reason': 'not_enrolled_in_current_generation'}
+        config = configuration(self.project)['configuration']
+        try:
+            with self.github.round(config['connection_reference']) if hasattr(self.github, 'round') else nullcontext():
+                return self._sync_once(store, ticket_id=ticket_id)  # One finite Adapter round covers qualification, writes and final requalification.
+        except DeliveryPending as exc:
+            with self._locked():
+                journal = self._journal()
+                selected = [b for b in journal['bindings'] if b['run_id'] == store.run_id and (ticket_id is None or b['ticket_id'] == ticket_id)]
+                progress = {'status': 'pending', 'reason': exc.reason}
+                if exc.retry_not_before is not None:
+                    progress['retry_not_before'] = exc.retry_not_before
+                if len(selected) == 1:
+                    progress['operations'] = selected[0]['progress'].get('operations', [])
+                    self._publish_progress(journal, selected[0], progress)
+                return progress
+
+    def _sync_once(self, store, *, ticket_id=None):
         state = self._state(store)
         if not self._enrolled(state):
             return {'status': 'unmanaged', 'reason': 'not_enrolled_in_current_generation'}
@@ -290,9 +431,19 @@ class IssueSync:
                         or latest_projection.get('sources') != binding['source_references']):
                     reason, delivery = 'qualification_changed_during_read', None
             progress = {'status': 'pending', 'reason': reason,
-                        'qualification_reason': projection.get('reason') if not projection['eligible'] else None}
+                        'qualification_reason': projection.get('reason') if not projection['eligible'] else None,
+                        'operations': copy.deepcopy(binding['progress'].get('operations', []))}  # New missing prerequisites never erase confirmed or failed remote history.
             if delivery:
                 progress.update(delivery)  # Qualification and successful remote synchronization remain distinct states.
+            if progress.get('delivery_eligible'):
+                try:
+                    progress = self._write_body(store, journal, binding, progress, state)
+                except DeliveryPending as exc:
+                    progress['reason'] = exc.reason  # A partial mutation remains pending until every readback matches.
+                    if exc.retry_not_before is not None:
+                        progress['retry_not_before'] = exc.retry_not_before
+                except (ValueError, TypeError, KeyError):
+                    progress['reason'] = 'remote_material_invalid'
             if binding['progress'] != progress:
                 binding['progress'] = progress
                 journal['revision'] += 1
