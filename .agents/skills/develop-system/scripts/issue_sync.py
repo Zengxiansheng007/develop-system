@@ -2,6 +2,7 @@
 from contextlib import contextmanager
 from contextlib import nullcontext
 import copy
+import difflib
 import errno
 import hashlib
 import json
@@ -246,7 +247,7 @@ class IssueSync:
         projection = store.acceptance_projection(ticket_id)
         fixed = {'run_id': store.run_id, 'enrollment': state['issue_sync_enrollment'], 'scope': scope,
                  'issue': issue_identity, 'final_pr': pull_identity, 'mapping': mapping, 'acceptance_source': source,
-                 'body_baseline_id': fingerprint(issue.get('body') or '')}
+                 'body_baseline_id': fingerprint(issue.get('body') or ''), 'body_baseline': issue.get('body') or ''}  # Preserve an exact local conflict baseline, never export it.
         with self._locked():
             latest = self._state(store)
             if not self._enrolled(latest) or latest['revision'] != state['revision']:
@@ -258,10 +259,11 @@ class IssueSync:
             candidate_id = projection.get('candidate_id') if projection['eligible'] else None
             if existing and existing.get('candidate_id') == candidate_id:
                 return copy.deepcopy(existing)
-            binding = {**fixed, 'schema_version': 1, 'binding_id': existing['binding_id'] if existing else uuid.uuid4().hex,
+            binding = {**(existing or {}), **fixed, 'schema_version': 1, 'binding_id': existing['binding_id'] if existing else uuid.uuid4().hex,
                        'ticket_id': ticket_id, 'candidate_id': candidate_id,
                        'source_references': projection.get('sources', []),
-                       'progress': {'status': 'pending', 'reason': 'final_delivery_unverified' if projection['eligible'] else 'acceptance_pending'}}
+                       'progress': copy.deepcopy(existing['progress']) if existing else
+                           {'status': 'pending', 'reason': 'final_delivery_unverified' if projection['eligible'] else 'acceptance_pending'}}  # Candidate adoption never clears durable controls or remote operation history.
             if existing:
                 journal['bindings'].remove(existing)
             journal['bindings'].append(binding)
@@ -310,13 +312,61 @@ class IssueSync:
         journal['revision'] += 1
         self._save(self.root / 'bindings.json', journal)  # Durable progress is independent of execution authority.
 
+    def _record_body_conflict(self, journal, binding, progress, expected, issue, stage, reason):
+        observed = issue.get('body')
+        conflict = {'conflict_id': uuid.uuid4().hex, 'status': 'unresolved', 'stage': stage, 'reason': reason,
+                    'expected_body': expected, 'expected_body_id': fingerprint(expected) if isinstance(expected, str) else binding['body_baseline_id'],
+                    'observed_body': observed, 'observed_body_id': fingerprint(observed),
+                    'difference': ''.join(difflib.unified_diff((expected or '').splitlines(keepends=True),
+                        (observed if isinstance(observed, str) else '').splitlines(keepends=True), fromfile='expected', tofile='observed')),
+                    'unfinished_steps': ['body'] + ['label:' + name for name in configuration(self.project)['configuration']['remove_labels']
+                        if name in issue.get('labels', [])] + (['close'] if issue.get('state') == 'open' or not any(
+                            op['kind'] == 'close' and op['status'] == 'confirmed' for op in progress.get('operations', [])) else []),
+                    'operations': copy.deepcopy(progress.get('operations', []))}  # Exact remote differences remain local and retain the original operation facts.
+        binding.setdefault('body_conflicts', []).append(conflict)
+        progress['body_conflict'] = copy.deepcopy(conflict)
+        self._publish_progress(journal, binding, progress)  # Publish the pause before returning or permitting another operation.
+        raise DeliveryPending(reason)
+
+    def _resolve_body_conflict(self, journal, binding, progress, state, issue, value):
+        conflicts = [c for c in binding.get('body_conflicts', []) if c['status'] == 'unresolved']
+        fields = {'conflict_id', 'expected_body', 'acceptance_map', 'user_reference'}
+        if (not conflicts or not isinstance(value, dict) or set(value) != fields
+                or value['conflict_id'] != conflicts[-1]['conflict_id']
+                or not isinstance(value['expected_body'], str) or not isinstance(value['user_reference'], str)
+                or not value['user_reference'].strip() or not isinstance(value['acceptance_map'], dict)
+                or set(value['acceptance_map']) != set(binding['mapping'])):
+            raise DeliveryPending('body_resolution_invalid')  # Explicit review cannot enlarge or shrink the original permitted AC write set.
+        if issue.get('body') != value['expected_body']:
+            self._record_body_conflict(journal, binding, progress, value['expected_body'], issue,
+                                       'resolution_read', 'body_resolution_stale')
+        try:
+            source = self._acceptance_source(state, binding['scope'], issue['body'])
+            mapping = self._mapping(value['acceptance_map'], binding['scope'], issue['body'], source)
+        except ValueError:
+            raise DeliveryPending('body_resolution_mapping_invalid') from None  # No old offset, duplicate selection or approximate text adoption.
+        for op in progress['operations']:
+            if op['kind'] == 'body' and op['status'] != 'confirmed' and not op.get('response_received'):
+                raise DeliveryPending('previous_request_failed' if op['status'] == 'failed' else 'operation_outcome_unknown')
+        resolution = {'user_reference': value['user_reference'], 'body_id': fingerprint(issue['body']),
+                      'mapping': copy.deepcopy(mapping), 'operation_count': len(progress['operations'])}
+        for conflict in conflicts:
+            conflict.update(status='resolved', resolution=copy.deepcopy(resolution))  # Retain every original difference and historical operation status.
+        binding.update(mapping=mapping, acceptance_source=source, body_baseline=issue['body'], body_baseline_id=resolution['body_id'],
+                       body_reconciliation={**resolution, 'body': issue['body']})
+        progress.pop('body_conflict', None)
+        self._publish_progress(journal, binding, progress)  # Current-body review changes only this conflict, never independent human/run control.
+
     def _qualification_matches(self, state, projection, binding):
         return (self._enrolled(state) and state['status'] in {'running', 'completed'} and projection['eligible']
                 and projection.get('candidate_id') == binding['candidate_id']
                 and projection.get('sources') == binding['source_references'])  # Callers supply fresh reads at each distinct stage.
 
     def _reconcile_operations(self, journal, binding, progress, issue, *, explicit_continue=False):
-        for op in progress['operations']:
+        for index, op in enumerate(progress['operations']):
+            if (op['kind'] == 'body' and index < binding.get('body_reconciliation', {}).get('operation_count', 0)
+                    and (op['status'] == 'confirmed' or op.get('response_received'))):
+                continue  # An explicit current-body review supersedes the old precondition without manufacturing confirmation.
             if op['status'] == 'confirmed':
                 continue  # Current effects are checked together below; a newer confirmed summary supersedes an older body value.
             if op['status'] == 'failed':
@@ -342,13 +392,23 @@ class IssueSync:
                 if op.get('observed_after') != observed or op['status'] != 'unknown':
                     op.update(status='unknown', observed_after=observed, confirmation='source_unattributed')
                     self._publish_progress(journal, binding, progress)  # Preserve the actual closed effect separately from unresolved request attribution.
+                body_values = [(i, item['expected_after']) for i, item in enumerate(progress['operations'])
+                               if item['kind'] == 'body' and item['status'] == 'confirmed']
+                reviewed = binding.get('body_reconciliation')
+                expected_body = (reviewed['body'] if reviewed and (not body_values or body_values[-1][0] < reviewed['operation_count'])
+                                 else body_values[-1][1] if body_values else binding.get('body_baseline'))  # Reviewed current body does not establish unknown close attribution.
+                if issue.get('body') != expected_body:
+                    self._record_body_conflict(journal, binding, progress, expected_body, issue, 'recovery_read', 'close_outcome_unknown')
                 raise DeliveryPending('close_outcome_unknown')  # Closed state alone cannot attribute a lost response to this request.
             if not applied:
+                if op['kind'] == 'body' and issue.get('body') != op['expected_before']:
+                    self._record_body_conflict(journal, binding, progress, op['expected_after'], issue,
+                                               'recovery_read', 'operation_outcome_unknown')
                 raise DeliveryPending('operation_outcome_unknown')  # Unsent and externally reverted requests are indistinguishable.
             op['status'], op['confirmation'] = 'confirmed', 'remote_effect_observed'
             self._publish_progress(journal, binding, progress)  # Preserve reconciled steps before sending any missing operation.
 
-    def _synchronize_issue(self, store, journal, binding, progress, state, *, explicit_continue=False):
+    def _synchronize_issue(self, store, journal, binding, progress, state, *, explicit_continue=False, body_resolution=None):
         config = configuration(self.project)['configuration']
         repository, number = config['repository'], binding['issue']['number']
         if not all(callable(getattr(self.github, name, None)) for name in ('update_issue_body', 'remove_issue_label', 'close_issue')):
@@ -358,13 +418,19 @@ class IssueSync:
         issue = self.github.get_issue(repository, number)
         if self._identity(issue, number, repository, 'issue') != binding['issue']:
             raise DeliveryPending('issue_identity_changed')
+        if body_resolution is not None:
+            self._resolve_body_conflict(journal, binding, progress, state, issue, body_resolution)
         self._reconcile_operations(journal, binding, progress, issue, explicit_continue=explicit_continue)  # A new instance always observes the remote before recovering intent.
         before = issue.get('body')
         body_operations = [op for op in operations if op['kind'] == 'body' and op['status'] == 'confirmed']
-        known_body = body_operations[-1]['expected_after'] if body_operations else None
+        latest_body_index = max((i for i, op in enumerate(operations) if op['kind'] == 'body' and op['status'] == 'confirmed'), default=-1)
+        reconciliation = binding.get('body_reconciliation')
+        known_body = (reconciliation['body'] if reconciliation and latest_body_index < reconciliation['operation_count']
+                      else body_operations[-1]['expected_after'] if body_operations else None)  # Later confirmed writes supersede the deliberately reviewed current body.
         if (not isinstance(before, str) or (body_operations and before != known_body)
                 or (not body_operations and fingerprint(before) != binding['body_baseline_id'])):
-            raise DeliveryPending('body_baseline_changed')
+            self._record_body_conflict(journal, binding, progress, known_body if body_operations else binding.get('body_baseline'),
+                                       issue, 'initial_read', 'body_baseline_changed')
         close = next((op for op in reversed(operations) if op['kind'] == 'close'), None)
         already_synced = (close is not None and close['status'] == 'confirmed'
                           and close.get('expected_after') == {'state': 'closed', 'state_reason': 'completed'}
@@ -382,11 +448,13 @@ class IssueSync:
             expected = self._body(binding, state, before, progress['delivery'])
         except ValueError:
             raise DeliveryPending('body_mapping_changed') from None
-        def read(expected_body, expected_labels, expected_state=expected_state):
+        def read(expected_body, expected_labels, expected_state=expected_state, *, stage='before_write'):
             current = self.github.get_issue(repository, number)
             if self._identity(current, number, repository, 'issue') != binding['issue']:
                 raise DeliveryPending('issue_identity_changed')
-            if current.get('body') != expected_body or sorted(current.get('labels', [])) != sorted(expected_labels) or current.get('state') != expected_state:
+            if current.get('body') != expected_body:
+                self._record_body_conflict(journal, binding, progress, expected_body, current, stage, 'issue_readback_mismatch')
+            if sorted(current.get('labels', [])) != sorted(expected_labels) or current.get('state') != expected_state:
                 raise DeliveryPending('issue_readback_mismatch')
             return current  # Every subsequent write uses a fresh matching observation.
 
@@ -410,7 +478,8 @@ class IssueSync:
             except Exception:
                 op['status'] = 'unknown'
                 raise DeliveryPending('remote_write_outcome_unknown') from None
-            actual = read(expected, labels, next_state)
+            op['response_received'] = True  # A returned request is distinct from a confirmed remote effect.
+            actual = read(expected, labels, next_state, stage='after_write')
             if next_state == 'closed' and actual.get('state_reason') != 'completed':
                 raise DeliveryPending('close_reason_readback_mismatch')
             op['status'] = 'confirmed'
@@ -451,16 +520,16 @@ class IssueSync:
             return {**progress, 'persistence': 'unavailable'}
         return {**progress, 'pending_record': str(path)}
 
-    def continue_sync(self, store, *, ticket_id=None):
-        return self._run_sync(store, ticket_id=ticket_id, explicit_continue=True)  # Explicit catch-up shares all gates and never calls RunStore.resume.
+    def continue_sync(self, store, *, ticket_id=None, body_resolution=None):
+        return self._run_sync(store, ticket_id=ticket_id, explicit_continue=True, body_resolution=body_resolution)  # Explicit catch-up shares all gates and never calls RunStore.resume.
 
     def sync_once(self, store, *, ticket_id=None):
         return self._run_sync(store, ticket_id=ticket_id)
 
-    def _run_sync(self, store, *, ticket_id=None, explicit_continue=False):
+    def _run_sync(self, store, *, ticket_id=None, explicit_continue=False, body_resolution=None):
         self._state(store)  # Reject a foreign authority before converting local persistence errors into pending.
         try:
-            return self._execute_once(store, ticket_id=ticket_id, explicit_continue=explicit_continue)
+            return self._execute_once(store, ticket_id=ticket_id, explicit_continue=explicit_continue, body_resolution=body_resolution)
         except LocalJournalConflict:
             return self._local_pending(store, 'local_revision_conflict')
         except (ValueError, TypeError, KeyError):
@@ -470,14 +539,14 @@ class IssueSync:
         except OSError:
             return self._local_pending(store, 'local_persistence_unavailable')
 
-    def _execute_once(self, store, *, ticket_id=None, explicit_continue=False):
+    def _execute_once(self, store, *, ticket_id=None, explicit_continue=False, body_resolution=None):
         state = self._state(store)
         if not self._enrolled(state):
             return {'status': 'unmanaged', 'reason': 'not_enrolled_in_current_generation'}
         config = configuration(self.project)['configuration']
         try:
             with self.github.round(config['connection_reference']) if hasattr(self.github, 'round') else nullcontext():
-                return self._sync_once(store, ticket_id=ticket_id, explicit_continue=explicit_continue)  # One finite Adapter round covers qualification, writes and final requalification.
+                return self._sync_once(store, ticket_id=ticket_id, explicit_continue=explicit_continue, body_resolution=body_resolution)  # One finite Adapter round covers qualification, writes and final requalification.
         except DeliveryPending as exc:
             with self._locked():
                 journal = self._journal()
@@ -486,11 +555,15 @@ class IssueSync:
                 if exc.retry_not_before is not None:
                     progress['retry_not_before'] = exc.retry_not_before
                 if len(selected) == 1:
-                    progress['operations'] = selected[0]['progress'].get('operations', [])
+                    for key in ('operations', 'body_conflict', 'human_pause'):
+                        if key in selected[0]['progress']:
+                            progress[key] = copy.deepcopy(selected[0]['progress'][key])  # Remote read failures cannot discard independent controls or conflict evidence.
+                    if selected[0]['progress'].get('status') == 'human_paused':
+                        progress['human_pause'] = {'reason': 'independent_human_pause'}
                     self._publish_progress(journal, selected[0], progress)
                 return progress
 
-    def _sync_once(self, store, *, ticket_id=None, explicit_continue=False):
+    def _sync_once(self, store, *, ticket_id=None, explicit_continue=False, body_resolution=None):
         state = self._state(store)
         if not self._enrolled(state):
             return {'status': 'unmanaged', 'reason': 'not_enrolled_in_current_generation'}
@@ -503,9 +576,14 @@ class IssueSync:
                 return {'status': 'pending', 'reason': 'explicit_ticket_selection_required'}
             binding = bindings[0]
             delivery = None  # Facts from a previous round never bypass a fresh PR/CI read.
+            conflict = next((c for c in reversed(binding.get('body_conflicts', [])) if c['status'] == 'unresolved'), None)
             projection = store.acceptance_projection(binding['ticket_id'])
             if state['status'] not in {'running', 'completed'}:
                 reason = 'run_control_stopped'
+            elif binding.get('human_pause') or binding['progress'].get('human_pause') or binding['progress'].get('status') == 'human_paused':
+                reason = 'issue_human_paused'  # Body review is never an Issue-level human reacquisition.
+            elif conflict is not None and body_resolution is None:
+                reason = conflict['reason']  # Restoring an old copy cannot silently release a saved conflict.
             elif not projection['eligible']:
                 reason = 'acceptance_pending'
             elif binding.get('candidate_id') != projection['candidate_id'] or binding['source_references'] != projection['sources']:
@@ -535,11 +613,15 @@ class IssueSync:
             progress = {'status': 'pending', 'reason': reason,
                         'qualification_reason': projection.get('reason') if not projection['eligible'] else None,
                         'operations': copy.deepcopy(binding['progress'].get('operations', []))}  # New missing prerequisites never erase confirmed or failed remote history.
+            if binding['progress'].get('human_pause') or binding['progress'].get('status') == 'human_paused':
+                progress['human_pause'] = copy.deepcopy(binding['progress'].get('human_pause') or {'reason': 'independent_human_pause'})  # Preserve control across pending reports.
+            if conflict is not None:
+                progress['body_conflict'] = copy.deepcopy(conflict)  # Keep the durable conflict visible through the public result.
             if delivery:
                 progress.update(delivery)  # Qualification and successful remote synchronization remain distinct states.
             if progress.get('delivery_eligible'):
                 try:
-                    progress = self._synchronize_issue(store, journal, binding, progress, state, explicit_continue=explicit_continue)
+                    progress = self._synchronize_issue(store, journal, binding, progress, state, explicit_continue=explicit_continue, body_resolution=body_resolution)
                 except DeliveryPending as exc:
                     progress['reason'] = exc.reason  # A partial mutation remains pending until every readback matches.
                     if exc.retry_not_before is not None:
