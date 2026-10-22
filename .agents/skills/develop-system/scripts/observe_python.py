@@ -1,10 +1,14 @@
 """Execute a Python script/module and observe code sources inside declared source ranges."""
 import hashlib
+import importlib.util  # Keep collector authorization separate from the target's public module namespace.
 import json
 from pathlib import Path
 import runpy
 import sys
-from check_binding import authorized_source
+_authorization_spec = importlib.util.spec_from_file_location('_develop_system_observer_authorization', Path(__file__).with_name('check_binding.py'))  # Resolve the collector's own sibling without importing a target-facing name.
+_authorization = importlib.util.module_from_spec(_authorization_spec)  # This private module is not installed into the target's check_binding cache slot.
+_authorization_spec.loader.exec_module(_authorization)  # Preserve the existing authorization implementation and exclusions.
+authorized_source = _authorization.authorized_source  # Reuse the same guard for every observed source before hashing.
 
 
 def python_invocation(command):

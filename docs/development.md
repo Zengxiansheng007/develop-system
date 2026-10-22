@@ -24,6 +24,8 @@ For changes, start with the affected tests and direct dependants. The release bo
 
 ## Maintenance
 
+The first Issue synchronization slice adds opt-in creation-time enrollment and read-only whole-ticket qualification; its public interface, source-currentness and compatibility boundaries are documented in [Issue synchronization](issue-sync/README.md). It remains default-off and performs no GitHub writes at this stage.
+
 Command receipts from tools/checks.py are independent check-record v2 and require no run. Managed checks separately use dispatched worktree bindings and actual execution-time source observation; see [check records](../.agents/skills/develop-system/references/check-records.md). Repository success is not automatically managed-frame proof. Existing v1 receipts remain historical originals.
 
 The verification entry accepts `--timeout <seconds>` per command (default 300). Use a bounded larger value when observed real Git worktree checks exceed that duration; preserve the original timeout receipt.

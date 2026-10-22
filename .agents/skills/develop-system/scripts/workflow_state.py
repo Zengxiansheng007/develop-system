@@ -16,7 +16,7 @@ from codex_runtime import accept_result, resolve_skill, children_resolved
 from validate_registry import validate, required_closure
 from grill_routing import decide_entry, decide_root_route
 from record_check import validate_record
-from check_binding import bind_worktree, validate_managed, validate_reference_candidate, validate_worktree
+from check_binding import bind_worktree, validate_managed, validate_reference_candidate, validate_worktree, source_inventory
 
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 
@@ -107,6 +107,93 @@ def frame_evidence(frame):
             + [e for c in frame.get("acceptance_checks", []) for e in c["evidence"]])
 
 
+def validate_ticket_scopes(scopes, criteria, plan):
+    """Freeze original whole-ticket declarations rather than post-hoc passed subsets."""
+    if not isinstance(scopes, list) or not scopes:
+        raise ValueError('Nonempty original ticket scopes required')
+    known_ids = {c['id'] for c in criteria}
+    steps = {s['step_id'] for s in plan}
+    seen = set()
+    for scope in scopes:
+        if (not isinstance(scope, dict) or set(scope) != {'ticket_id', 'acceptance_ids', 'required_steps', 'input_version', 'candidate_paths'}
+                or not isinstance(scope['ticket_id'], str) or not re.fullmatch(r'[1-9][0-9]*:[1-9][0-9]*', scope['ticket_id'])
+                or scope['ticket_id'] in seen or not isinstance(scope['input_version'], str) or not scope['input_version'].strip()):
+            raise ValueError('Explicit unique ticket identity and original input version required')
+        paths = scope['candidate_paths']
+        if (not isinstance(paths, list) or not paths or any(not isinstance(p, str) or not p.strip()
+                or Path(p).is_absolute() or '..' in Path(p).parts for p in paths) or len(set(paths)) != len(paths)):
+            raise ValueError('Explicit relative ticket candidate ranges required')
+        seen.add(scope['ticket_id'])
+        for key, known in (('acceptance_ids', known_ids), ('required_steps', steps)):
+            values = scope[key]
+            if (not isinstance(values, list) or not values or any(not isinstance(v, str) for v in values)
+                    or len(set(values)) != len(values) or not set(values) <= known):
+                raise ValueError('Complete original ticket AC and work scope required')
+    return copy.deepcopy(scopes)
+
+
+def completion_qualification(state, criteria, checks, relevant, steps):
+    """One qualification rule shared by whole-run completion and read-only ticket views."""
+    if any(r['kind'] == 'system' for r in state['restrictions']):
+        raise ValueError('Professional system restrictions remain unresolved')
+    if any(s['required'] and s['status'] != 'completed' for s in steps):
+        raise ValueError('Necessary scoped steps are unfinished')
+    if any(not frame_resolved(f) for f in relevant):
+        raise ValueError('Unresolved skill work or findings remain')
+    if any(not children_resolved(f, relevant, state) for f in relevant):
+        raise ValueError('Mandatory helper obligations remain unresolved')
+    if any(not frame_is_current(state, f) for f in relevant):
+        raise ValueError('Revalidate changed artifacts before completion')
+    current_ids = {f['frame_id'] for f in relevant}
+    if any(not evidence_is_current(e) for a in state['assessments'] if a['frame_id'] in current_ids for e in a['evidence']):
+        raise ValueError('Revalidate changed assessment evidence before completion')
+    if not isinstance(checks, list) or any(not isinstance(c, dict) or set(c) != {'id', 'source_frame_id'} for c in checks):
+        raise ValueError('Completion only accepts specialist conclusion references, not controller assertions')
+    index = {c['id']: c for c in checks}
+    if len(index) != len(checks) or set(index) != {c['id'] for c in criteria}:
+        raise ValueError('Every acceptance criterion needs one checked result')
+    qualified = []
+    for criterion in criteria:
+        reference = index[criterion['id']]
+        source = next((f for f in relevant if f['frame_id'] == reference['source_frame_id']), None)
+        event = next((e for e in reversed(state['events']) if e['frame_id'] == reference['source_frame_id']), None)
+        if not source or source['status'] != 'completed' or not event or source['skill_id'] in {'develop-system', 'ask-matt'}:
+            raise ValueError('Acceptance source must be a current completed specialist frame')
+        check = next((c for c in event.get('acceptance_checks', []) if c['id'] == criterion['id']), None)
+        if not check or check.get('status') != 'passed' or check.get('completion_checked') is not True or not check.get('evidence'):
+            raise ValueError('Acceptance lacks a passed specialist conclusion')
+        if (check.get('kind') != criterion['kind'] or event.get('input_version') != source['input_version']
+                or (criterion['allowed_skill_ids'] and source['skill_id'] not in criterion['allowed_skill_ids'])
+                or (check['kind'] == 'human' and (check.get('human_confirmed') is not True or not check.get('user_reference')))):
+            raise ValueError('Acceptance source kind, ownership or human confirmation does not match')
+        qualified.append({**criterion, 'status': 'passed', 'evidence': [file_evidence(e) for e in check['evidence']],
+                          'source_frame_id': source['frame_id'], 'source_skill_id': source['skill_id'], 'kind': check['kind']})
+    return qualified
+
+
+def ticket_candidates(state, frame, checks):
+    """Capture declared contents at a real specialist return, without inventing an execution."""
+    passed = {c['id'] for c in checks if c.get('status') == 'passed'}
+    scopes = [s for s in state.get('ticket_scopes', []) if set(s['acceptance_ids']) & passed
+              and root_step_id(state, frame['frame_id']) in s['required_steps']]
+    captured = {}
+    for scope in scopes:
+        binding = frame.get('worktree_binding')
+        if binding:
+            validate_worktree(binding)  # A bound worktree never falls back to another source tree.
+            root = Path(binding['worktree']['root'])
+            authorized = binding['source_ranges']
+        else:
+            root = Path(state['project_root'])  # Unbound professional references stay within this project's declared files.
+            authorized = scope['candidate_paths']
+        files = source_inventory(root, authorized, [{'path': p, 'role': 'source'} for p in scope['candidate_paths']])
+        if not files:
+            raise ValueError('Declared ticket candidate contains no files')
+        captured[scope['ticket_id']] = {'root': str(root), 'scope_id': hashlib.sha256(json.dumps(scope, sort_keys=True).encode()).hexdigest(),
+                                        'files': [files[p] for p in sorted(files)]}
+    return captured
+
+
 def validate_frame_check(state, frame, check, record, visiting=()):
     actual = validate_record(record)
     if check.get("status") != actual:
@@ -142,6 +229,9 @@ def frame_is_current(state, frame, visiting=()):
     if frame["frame_id"] in visiting or not all(evidence_is_current(e) for e in frame_evidence(frame)):
         return False
     try:
+        candidates = ticket_candidates(state, frame, frame.get('acceptance_checks', []))
+        if (candidates or frame.get('ticket_candidates')) and frame.get('ticket_candidates') != candidates:
+            return False  # A stable review report cannot qualify changed declared source contents.
         from legacy_compat import original_frame, current_qualification
         legacy = original_frame(state, frame)
         if legacy:
@@ -554,7 +644,7 @@ class RunStore:
         from run_migration import rollback
         return rollback(self, revision, receipt)
 
-    def create(self, goal, plan, acceptance, registry_path=SKILL_ROOT / "registry.json"):
+    def create(self, goal, plan, acceptance, registry_path=SKILL_ROOT / "registry.json", *, ticket_scopes=None):
         registry, registry_path, digest = load_registry(registry_path)
         validate_plan(plan, registry)
         plan = capture_capability_authorizations(plan)
@@ -578,6 +668,12 @@ class RunStore:
                  "plan": [{**s, "status": "pending", "required": s.get("required", True)} for s in plan],
                  "acceptance": criteria,
                  "frames": [], "events": [], "assessments": [], "next_decision": {"action": "select_ready"}}
+        from issue_sync import capture_enrollment  # Freeze opt-in eligibility only while creating this new identity.
+        enrollment = capture_enrollment(self.project)
+        if enrollment is not None:
+            state['issue_sync_enrollment'] = enrollment  # Historical runs cannot acquire this through resume or binding.
+        if ticket_scopes is not None:
+            state['ticket_scopes'] = validate_ticket_scopes(ticket_scopes, criteria, plan)  # Capture complete scope only at creation.
         self.root.mkdir(parents=True, exist_ok=True)
         with self.locked():
             if self.path.exists():
@@ -883,6 +979,11 @@ class RunStore:
                     raise ValueError("Passed acceptance needs a completed specialist and evidence")
                 if check["kind"] == "human" and (check.get("human_confirmed") is not True or not isinstance(check.get("user_reference"), str) or not check["user_reference"].strip()):
                     raise ValueError("Human acceptance requires an actual user confirmation reference")
+        captured_candidates = ticket_candidates(state, selected_frame, acceptance) if item['status'] == 'completed' else {}
+        if captured_candidates:
+            item['ticket_candidates'] = captured_candidates  # Collected from original authority and actual allowed bytes.
+        elif 'ticket_candidates' in item:
+            raise ValueError('Caller cannot attach unrelated candidate qualification')
         updated, decision = accept_result(state, item)
         if decision["action"] == "duplicate":
             return state
@@ -890,6 +991,8 @@ class RunStore:
         frame["artifacts"] = item["artifacts"]
         frame["checks"] = item["checks"]
         frame["acceptance_checks"] = acceptance
+        if captured_candidates:
+            frame['ticket_candidates'] = captured_candidates
         frame["resolved_findings"] = resolutions
         frame["block_scope"] = item.get("block_scope", "local")
         if item["status"] == "completed":
@@ -1170,38 +1273,50 @@ class RunStore:
             return state
         return self.mutate(revision, change)
 
+    def acceptance_projection(self, ticket_id):
+        """Read original ticket scope and current specialist conclusions without mutating authority."""
+        state = self.read()
+        scope = next((s for s in state.get('ticket_scopes', []) if s['ticket_id'] == ticket_id), None)
+        if state['schema_version'] != 4 or scope is None:
+            return {'eligible': False, 'reason': 'Original complete ticket scope is unavailable'}
+        try:
+            validate_ticket_scopes([scope], state['acceptance'], state['plan'])
+            selected = set(scope['required_steps'])
+            while True:
+                expanded = selected | {d for s in state['plan'] if s['step_id'] in selected for d in s.get('depends_on', [])}
+                if expanded == selected:
+                    break
+                selected = expanded  # Necessary upstream work is part of the same completion closure.
+            steps = [s for s in state['plan'] if s['step_id'] in selected]
+            relevant = [f for f in state['frames'] if f['status'] != 'superseded' and root_step_id(state, f['frame_id']) in selected]
+            criteria = [c for c in state['acceptance'] if c['id'] in scope['acceptance_ids']]
+            references = []
+            for criterion in criteria:
+                event = next((e for e in reversed(state['events']) if any(c['id'] == criterion['id'] for c in e.get('acceptance_checks', []))
+                              and any(f['frame_id'] == e['frame_id'] for f in relevant)), None)
+                if event is None:
+                    raise ValueError('Acceptance lacks a passed specialist conclusion')
+                if event['input_version'] != scope['input_version']:
+                    raise ValueError('Specialist conclusion belongs to another ticket input version')
+                source = next(f for f in relevant if f['frame_id'] == event['frame_id'])
+                if root_step_id(state, source['frame_id']) not in scope['required_steps']:
+                    raise ValueError('Specialist conclusion belongs to another ticket work scope')
+                references.append({'id': criterion['id'], 'source_frame_id': source['frame_id']})
+            qualified = completion_qualification(state, criteria, references, relevant, steps)
+            identity = [{'frame_id': f['frame_id'], 'input_version': f['input_version'], 'evidence': frame_evidence(f),
+                         'ticket_candidates': f.get('ticket_candidates', {})} for f in relevant]
+            return {'eligible': True, 'reason': None, 'run_id': self.run_id, 'ticket_id': ticket_id,
+                    'input_version': scope['input_version'], 'acceptance': qualified, 'sources': references,
+                    'candidate_id': hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()}
+        except (ValueError, OSError, KeyError, TypeError) as exc:
+            return {'eligible': False, 'reason': str(exc)}  # Unknown provenance never becomes a passed projection.
+
     def complete(self, revision, checks):
         def change(state):
-            if any(r["kind"] == "system" for r in state["restrictions"]):
-                raise ValueError("Professional system restrictions remain unresolved")
-            if state["status"] != "running" or any(s["required"] and s["status"] != "completed" for s in state["plan"]):
-                raise ValueError("Necessary scoped steps are unfinished")
-            relevant = [f for f in state["frames"] if f["status"] != "superseded"]
-            if any(not frame_resolved(f) for f in relevant):
-                raise ValueError("Unresolved skill work or findings remain")
-            if any(not children_resolved(f, relevant, state) for f in relevant):
-                raise ValueError('Mandatory helper obligations remain unresolved')
-            if any(not frame_is_current(state, f) for f in relevant):
-                raise ValueError("Revalidate changed artifacts before completion")
-            current_ids = {f["frame_id"] for f in relevant}
-            if any(not evidence_is_current(e) for a in state["assessments"] if a["frame_id"] in current_ids for e in a["evidence"]):
-                raise ValueError("Revalidate changed assessment evidence before completion")
-            index = {c["id"]: c for c in checks}
-            if len(index) != len(checks) or set(index) != {c["id"] for c in state["acceptance"]}:
-                raise ValueError("Every acceptance criterion needs one checked result")
-            for criterion in state["acceptance"]:
-                reference = index[criterion["id"]]
-                if set(reference) != {"id", "source_frame_id"}:
-                    raise ValueError("Completion only accepts specialist conclusion references, not controller assertions")
-                source = next((f for f in relevant if f["frame_id"] == reference["source_frame_id"]), None)
-                event = next((e for e in reversed(state["events"]) if e["frame_id"] == reference["source_frame_id"]), None)
-                if not source or source["status"] != "completed" or not event or source["skill_id"] in {"develop-system", "ask-matt"}:
-                    raise ValueError("Acceptance source must be a current completed specialist frame")
-                check = next((c for c in event.get("acceptance_checks", []) if c["id"] == criterion["id"]), None)
-                if not check or check.get("status") != "passed" or check.get("completion_checked") is not True or not check.get("evidence"):
-                    raise ValueError("Acceptance lacks a passed specialist conclusion")
-                criterion.update(status="passed", evidence=[file_evidence(e) for e in check["evidence"]],
-                                 source_frame_id=source["frame_id"], source_skill_id=source["skill_id"], kind=check["kind"])
+            if state['status'] != 'running':
+                raise ValueError('Necessary scoped steps are unfinished')
+            relevant = [f for f in state['frames'] if f['status'] != 'superseded']
+            state['acceptance'] = completion_qualification(state, state['acceptance'], checks, relevant, state['plan'])
             state["status"] = "completed"
             state["control"]["status"] = "completed"
             state["next_decision"] = {"action": "complete", "return_to": "develop-system"}
