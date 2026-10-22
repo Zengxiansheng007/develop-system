@@ -1,12 +1,16 @@
 """Project-owned Issue synchronization; execution authority remains in RunStore."""
 from contextlib import contextmanager
+from contextlib import nullcontext
 import copy
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
+import time
 import uuid
+from issue_delivery import DeliveryPending, qualify_delivery  # Remote qualification remains outside execution authority.
 
 
 def fingerprint(value):
@@ -68,10 +72,11 @@ def capture_enrollment(project):
 
 class IssueSync:
     """Small public seam for configuration, binding and one bounded synchronization."""
-    def __init__(self, project_root, github):
+    def __init__(self, project_root, github, *, clock=time.time):
         self.project = Path(project_root).resolve(strict=True)
         self.root = self.project / '.develop-system/issue-sync'
         self.github = github  # Only the external API boundary is replaceable in behavior tests.
+        self.clock = clock  # A wall clock preserves service wait boundaries across explicit continuations.
 
     @contextmanager
     def _locked(self):
@@ -194,9 +199,10 @@ class IssueSync:
                 or type(final_pr['number']) is not int or final_pr['number'] <= 0
                 or type(final_pr['repository_id']) is not int or final_pr['repository_id'] != repository['id']):
             raise ValueError('Exactly one final PR in the configured repository is supported')
-        issue = self.github.get_issue(repository, issue_number)
+        with self.github.round(config['connection_reference']) if hasattr(self.github, 'round') else nullcontext():
+            issue = self.github.get_issue(repository, issue_number)
+            pull = self.github.get_pull_request(repository, final_pr['number'])  # Binding reads share the same finite request budget.
         issue_identity = self._identity(issue, issue_number, repository, 'issue')
-        pull = self.github.get_pull_request(repository, final_pr['number'])
         pull_identity = self._identity(pull, final_pr['number'], repository, 'pull_request')
         ticket_id = str(repository['id']) + ':' + str(issue_identity['id'])
         scope = next((s for s in state.get('ticket_scopes', []) if s['ticket_id'] == ticket_id), None)
@@ -251,6 +257,7 @@ class IssueSync:
             if len(bindings) != 1:
                 return {'status': 'pending', 'reason': 'explicit_ticket_selection_required'}
             binding = bindings[0]
+            delivery = None  # Facts from a previous round never bypass a fresh PR/CI read.
             projection = store.acceptance_projection(binding['ticket_id'])
             if state['status'] not in {'running', 'completed'}:
                 reason = 'run_control_stopped'
@@ -262,10 +269,30 @@ class IssueSync:
                 reason = 'original_scope_changed'
             elif [{'id': c['id'], 'text': c['criterion'].strip()} for c in state['acceptance'] if c['id'] in binding['scope']['acceptance_ids']] != binding['acceptance_source']['items']:
                 reason = 'original_acceptance_source_changed'
+            elif (type(binding['progress'].get('retry_not_before')) in (float, int)
+                    and math.isfinite(binding['progress']['retry_not_before']) and binding['progress']['retry_not_before'] > self.clock()):
+                reason = 'rate_limited'
+                delivery = {'retry_not_before': binding['progress']['retry_not_before']}  # A new explicit continue never bypasses a service wait.
             else:
-                reason = 'final_delivery_unverified'  # #16 adds real delivery qualification; #15 never writes GitHub.
+                try:
+                    delivery = qualify_delivery(self.github, configuration(self.project)['configuration']['repository'],
+                                                configuration(self.project)['configuration'], binding, state)
+                    reason = delivery['reason']
+                except DeliveryPending as exc:
+                    reason = exc.reason  # Read failures remain local synchronization pending, not professional failures.
+                    if exc.retry_not_before is not None:
+                        delivery = {'retry_not_before': exc.retry_not_before}
+            if delivery and delivery.get('delivery_eligible'):
+                latest_state = self._state(store)
+                latest_projection = store.acceptance_projection(binding['ticket_id'])  # Remote waits cannot freeze professional currentness.
+                if (not self._enrolled(latest_state) or latest_state['status'] not in {'running', 'completed'}
+                        or not latest_projection['eligible'] or latest_projection.get('candidate_id') != binding['candidate_id']
+                        or latest_projection.get('sources') != binding['source_references']):
+                    reason, delivery = 'qualification_changed_during_read', None
             progress = {'status': 'pending', 'reason': reason,
                         'qualification_reason': projection.get('reason') if not projection['eligible'] else None}
+            if delivery:
+                progress.update(delivery)  # Qualification and successful remote synchronization remain distinct states.
             if binding['progress'] != progress:
                 binding['progress'] = progress
                 journal['revision'] += 1
