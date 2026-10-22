@@ -385,10 +385,12 @@ class IssueSyncTests(unittest.TestCase):
             journal.write_text(json.dumps(value), encoding='utf-8')  # Supply an unknown persisted binding through the actual file boundary.
             journal_before = journal.read_bytes()  # Rejection must not silently adopt or rewrite the unknown record.
             for consumer in (lambda: self.sync.status(), lambda: self.sync.status(store),
-                             lambda: self.sync.bind(store, **arguments), lambda: self.sync.sync_once(store)):
+                             lambda: self.sync.bind(store, **arguments)):
                 with self.subTest(version=version, consumer=consumer), self.assertRaisesRegex(ValueError, 'binding'):
                     consumer()  # Every approved public reader must share the version gate.
                 self.assertEqual(journal.read_bytes(), journal_before)  # No side-state write occurs on rejection.
+            self.assertEqual(self.sync.sync_once(store)['reason'], 'local_record_invalid')  # The execution entry leaves a durable local pending instead of propagating format failure.
+            self.assertEqual(journal.read_bytes(), journal_before)  # Unknown binding formats still remain untouched.
         self.assertEqual(store.path.read_bytes(), before)  # Execution authority is unchanged by all rejected reads.
         self.assertEqual(self.github.writes, [])  # No unknown version authorizes a remote operation.
 
@@ -421,10 +423,12 @@ class IssueSyncTests(unittest.TestCase):
                 path.write_text(json.dumps(original), encoding='utf-8')  # No execution state is manufactured by these inputs.
                 persisted = path.read_bytes()  # Rejection must preserve the unsupported input.
                 for name, consumer in (('status', lambda: self.sync.status()), ('bind', lambda: self.sync.bind(store, **arguments)),
-                                       ('sync_once', lambda: self.sync.sync_once(store))):
+                                       ):
                     with self.subTest(layer=layer, invalid=invalid, consumer=name), self.assertRaises(ValueError):
                         consumer()  # Public consumers reject unknown semantics without an attribute/type crash.
                     self.assertEqual(path.read_bytes(), persisted)  # No automatic replacement or migration occurs.
+                self.assertEqual(self.sync.sync_once(store)['reason'], 'local_record_invalid')  # Synchronization reports the same fail-closed version gate as local pending.
+                self.assertEqual(path.read_bytes(), persisted)  # Pending diagnostics never adopt the unsupported record.
         self.assertEqual(store.path.read_bytes(), before)  # Unknown records never become execution authority.
         self.assertEqual(self.github.writes, [])  # The complete matrix remains zero remote writes.
 

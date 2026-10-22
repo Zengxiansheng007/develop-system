@@ -55,11 +55,12 @@ class WritableGitHub(delivery_fixtures.DeliveryGitHub):
 
 class MutationHTTP:
     """External delivery facts plus real HTTP Issue reads/writes, without private production mocks."""
-    def __init__(self, fixture, *, error_status=None, corrupt_body=False, missing_labels=False, read_only=False):
+    def __init__(self, fixture, *, error_status=None, corrupt_body=False, missing_labels=False, read_only=False, malformed_kind=None):
         self.fixture, self.error_status, self.corrupt_body = fixture, error_status, corrupt_body
         self.requests, self.errors = [], []
         self.missing_labels = missing_labels  # A malformed/incomplete response cannot prove removable-label state.
         self.read_only = read_only
+        self.malformed_kind = malformed_kind  # Simulate an applied mutation whose actual HTTP response cannot be decoded.
 
     def __enter__(self):
         from issue_github import GitHubReadAdapter, GitHubIssueAdapter, BoundedHTTPTransport
@@ -96,7 +97,8 @@ class MutationHTTP:
                         result['labels'] = [{'name': name} for name in result['labels']]
                         if boundary.missing_labels:
                             result.pop('labels')
-                    encoded = json.dumps(result).encode('utf-8')
+                    kind = 'body' if self.command == 'PATCH' and value and 'body' in value else 'label' if self.command == 'DELETE' else 'close' if self.command == 'PATCH' else None
+                    encoded = b'invalid-json' if kind and kind == boundary.malformed_kind else json.dumps(result).encode('utf-8')
                 except Exception as error:
                     boundary.errors.append(type(error).__name__)
                     status, encoded = 500, b'{}'

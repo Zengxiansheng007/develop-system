@@ -13,6 +13,10 @@ import uuid
 from issue_delivery import DeliveryPending, qualify_delivery  # Remote qualification remains outside execution authority.
 
 
+class LocalJournalConflict(Exception):
+    """A conflicting local publisher must not be rewritten as remote failure."""
+
+
 def fingerprint(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':')).encode()).hexdigest()  # Stable references contain no credentials.
 
@@ -98,6 +102,8 @@ class IssueSync:
                 json.dump(value, stream, ensure_ascii=False, indent=2)
                 stream.flush()
                 os.fsync(stream.fileno())  # Durable publication precedes later dependent actions.
+            if path == self.root / 'bindings.json' and self._journal()['revision'] != value['revision'] - 1:
+                raise LocalJournalConflict()  # Cooperative local locking plus revision validation; never overwrite a newer publisher.
             os.replace(temporary, path)
         finally:
             if temporary.exists():
@@ -282,21 +288,52 @@ class IssueSync:
                 and projection.get('candidate_id') == binding['candidate_id']
                 and projection.get('sources') == binding['source_references'])  # Callers supply fresh reads at each distinct stage.
 
-    def _synchronize_issue(self, store, journal, binding, progress, state):
+    def _reconcile_operations(self, journal, binding, progress, issue, *, explicit_continue=False):
+        for op in progress['operations']:
+            if op['status'] == 'confirmed':
+                continue  # Already confirmed effects still face the ordinary full remote readback.
+            if op['status'] == 'failed':
+                if op.get('retry_authorized'):
+                    continue  # The original definitive rejection remains immutable history.
+                previous = op['expected_before']
+                unchanged = (issue.get('body') == previous if op['kind'] == 'body' else
+                    isinstance(issue.get('labels'), list) and previous['name'] in issue['labels'] if op['kind'] == 'label' else
+                    issue.get('state') == 'open')
+                if not explicit_continue or not unchanged:
+                    raise DeliveryPending('previous_request_failed')
+                op['retry_authorized'] = 'explicit_continue_after_remote_read'
+                self._publish_progress(journal, binding, progress)  # Only a new explicit invocation can retry a definitively rejected, still-missing effect.
+                continue
+            if op.get('candidate_id') != binding['candidate_id'] or op.get('delivery_sha') != progress['delivery']['sha']:
+                raise DeliveryPending('operation_source_changed')
+            if op['kind'] == 'body':
+                applied = issue.get('body') == op['expected_after']
+            elif op['kind'] == 'label':
+                applied = isinstance(issue.get('labels'), list) and op['expected_after']['name'] not in issue['labels']
+            else:
+                observed = {'state': issue.get('state'), 'state_reason': issue.get('state_reason')}
+                if op.get('observed_after') != observed or op['status'] != 'unknown':
+                    op.update(status='unknown', observed_after=observed, confirmation='source_unattributed')
+                    self._publish_progress(journal, binding, progress)  # Preserve the actual closed effect separately from unresolved request attribution.
+                raise DeliveryPending('close_outcome_unknown')  # Closed state alone cannot attribute a lost response to this request.
+            if not applied:
+                raise DeliveryPending('operation_outcome_unknown')  # Unsent and externally reverted requests are indistinguishable.
+            op['status'], op['confirmation'] = 'confirmed', 'remote_effect_observed'
+            self._publish_progress(journal, binding, progress)  # Preserve reconciled steps before sending any missing operation.
+
+    def _synchronize_issue(self, store, journal, binding, progress, state, *, explicit_continue=False):
         config = configuration(self.project)['configuration']
         repository, number = config['repository'], binding['issue']['number']
         if not all(callable(getattr(self.github, name, None)) for name in ('update_issue_body', 'remove_issue_label', 'close_issue')):
             return progress  # Existing read-only clients remain qualification-only.
         operations = copy.deepcopy(binding['progress'].get('operations', []))
         progress['operations'] = operations
-        if any(op['status'] != 'confirmed' for op in operations):
-            reason = 'previous_request_failed' if all(op['status'] in {'failed', 'confirmed'} for op in operations) else 'operation_outcome_unknown'
-            raise DeliveryPending(reason)  # Keep definitive rejection distinct from an ambiguous response; recovery remains a separate slice.
         issue = self.github.get_issue(repository, number)
         if self._identity(issue, number, repository, 'issue') != binding['issue']:
             raise DeliveryPending('issue_identity_changed')
+        self._reconcile_operations(journal, binding, progress, issue, explicit_continue=explicit_continue)  # A new instance always observes the remote before recovering intent.
         before = issue.get('body')
-        body_operations = [op for op in operations if op['kind'] == 'body']
+        body_operations = [op for op in operations if op['kind'] == 'body' and op['status'] == 'confirmed']
         known_body = body_operations[-1]['expected_after'] if body_operations else None
         if not isinstance(before, str) or (before != known_body and fingerprint(before) != binding['body_baseline_id']):
             raise DeliveryPending('body_baseline_changed')
@@ -335,7 +372,9 @@ class IssueSync:
             try:
                 request()
             except DeliveryPending as exc:
-                op['status'] = 'unknown' if exc.reason.startswith(('http_', 'remote_service')) else 'failed'
+                definitive = {'connection_unauthorized', 'permission_denied', 'remote_material_missing', 'remote_material_gone',
+                              'remote_request_rejected', 'rate_limited', 'remote_body_invalid', 'remote_label_invalid'}
+                op['status'] = 'failed' if exc.reason in definitive else 'unknown'  # Invalid/lost response bodies cannot prove the write was rejected.
                 op['reason'] = exc.reason
                 raise
             except Exception:
@@ -372,14 +411,43 @@ class IssueSync:
                lambda: self.github.close_issue(repository, number), labels, 'closed')
         return {**progress, 'status': 'synced', 'reason': 'remote_verified'}
 
+    def _local_pending(self, store, reason):
+        progress = {'schema_version': 1, 'status': 'pending', 'reason': reason, 'run_id': store.run_id}
+        path = self.root / ('pending-' + uuid.uuid4().hex + '.json')
+        try:
+            self.root.mkdir(parents=True, exist_ok=True)
+            self._save(path, progress)  # Independent diagnostic publication never rewrites a locked or unknown journal.
+        except OSError:
+            return {**progress, 'persistence': 'unavailable'}
+        return {**progress, 'pending_record': str(path)}
+
+    def continue_sync(self, store, *, ticket_id=None):
+        return self._run_sync(store, ticket_id=ticket_id, explicit_continue=True)  # Explicit catch-up shares all gates and never calls RunStore.resume.
+
     def sync_once(self, store, *, ticket_id=None):
+        return self._run_sync(store, ticket_id=ticket_id)
+
+    def _run_sync(self, store, *, ticket_id=None, explicit_continue=False):
+        self._state(store)  # Reject a foreign authority before converting local persistence errors into pending.
+        try:
+            return self._execute_once(store, ticket_id=ticket_id, explicit_continue=explicit_continue)
+        except LocalJournalConflict:
+            return self._local_pending(store, 'local_revision_conflict')
+        except (ValueError, TypeError, KeyError):
+            return self._local_pending(store, 'local_record_invalid')
+        except FileExistsError:
+            return self._local_pending(store, 'local_lock_unavailable')
+        except OSError:
+            return self._local_pending(store, 'local_persistence_unavailable')
+
+    def _execute_once(self, store, *, ticket_id=None, explicit_continue=False):
         state = self._state(store)
         if not self._enrolled(state):
             return {'status': 'unmanaged', 'reason': 'not_enrolled_in_current_generation'}
         config = configuration(self.project)['configuration']
         try:
             with self.github.round(config['connection_reference']) if hasattr(self.github, 'round') else nullcontext():
-                return self._sync_once(store, ticket_id=ticket_id)  # One finite Adapter round covers qualification, writes and final requalification.
+                return self._sync_once(store, ticket_id=ticket_id, explicit_continue=explicit_continue)  # One finite Adapter round covers qualification, writes and final requalification.
         except DeliveryPending as exc:
             with self._locked():
                 journal = self._journal()
@@ -392,7 +460,7 @@ class IssueSync:
                     self._publish_progress(journal, selected[0], progress)
                 return progress
 
-    def _sync_once(self, store, *, ticket_id=None):
+    def _sync_once(self, store, *, ticket_id=None, explicit_continue=False):
         state = self._state(store)
         if not self._enrolled(state):
             return {'status': 'unmanaged', 'reason': 'not_enrolled_in_current_generation'}
@@ -441,7 +509,7 @@ class IssueSync:
                 progress.update(delivery)  # Qualification and successful remote synchronization remain distinct states.
             if progress.get('delivery_eligible'):
                 try:
-                    progress = self._synchronize_issue(store, journal, binding, progress, state)
+                    progress = self._synchronize_issue(store, journal, binding, progress, state, explicit_continue=explicit_continue)
                 except DeliveryPending as exc:
                     progress['reason'] = exc.reason  # A partial mutation remains pending until every readback matches.
                     if exc.retry_not_before is not None:
