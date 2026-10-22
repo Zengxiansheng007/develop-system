@@ -194,6 +194,8 @@ class DeliveryTests(unittest.TestCase):
                 value = {'total_count': 2, 'jobs': fixture.jobs[page - 1:page]}
                 if page == 1:
                     headers['link'] = '<https://api.github.com/repos/fixture/project/actions/runs/201/attempts/1/jobs?per_page=100&page=2>; rel="next"'
+            elif path == '/actions/runs/202/attempts/1/jobs':
+                value = {'total_count': 0, 'jobs': []}  # The newest queued attempt has no published required jobs yet.
             else:
                 self.fail('Unexpected synthetic HTTP endpoint: ' + path)
             return {'status': 200, 'headers': headers, 'body': json.dumps(value).encode()}
@@ -205,10 +207,15 @@ class DeliveryTests(unittest.TestCase):
             result = self.sync.sync_once(store)
             self.assertTrue(result['delivery_eligible'])
             fixture.jobs[1]['conclusion'] = 'failure'
-            self.assertFalse(self.sync.sync_once(store).get('delivery_eligible', False))  # A failed second HTTP page cannot disappear.
+            failed = self.sync.sync_once(store)
+            self.assertFalse(failed.get('delivery_eligible', False))  # A failed second HTTP page cannot disappear.
+            self.assertEqual(failed['reason'], 'required_ci_not_successful')  # A transport deadline cannot stand in for a selected job failure.
             fixture.jobs[1]['conclusion'] = 'success'
             fixture.runs.append({**fixture.runs[0], 'id': 202, 'run_number': 2, 'status': 'queued', 'conclusion': None})
-            self.assertFalse(self.sync.sync_once(store).get('delivery_eligible', False))  # A newer pending execution arrives on page two.
+            pending = self.sync.sync_once(store)
+            self.assertFalse(pending.get('delivery_eligible', False))  # A newer pending execution arrives on page two.
+            self.assertEqual(pending['reason'], 'required_ci_missing_or_ambiguous')  # Require the actual missing-job fact.
+            self.assertIn('/repos/fixture/project/actions/runs/202/attempts/1/jobs', [urlsplit(request.full_url).path for request in requests])
         self.assertTrue(any('page=2' in request.full_url for request in requests))
         self.assertTrue(all(request.get_header('Authorization') == 'Bearer synthetic-token' for request in requests))
         self.assertEqual(store.path.read_bytes(), before)
@@ -253,8 +260,9 @@ class DeliveryTests(unittest.TestCase):
                     'body': b'{"total_count":1,"workflow_runs":[{"id":201}]}'}
         with ControlledHTTP(responder) as actual_http:
             adapter = GitHubReadAdapter(connection_reference='fixture-connection', token_provider=lambda _: 'synthetic-token', transport=actual_http)
-            with self.assertRaises(DeliveryPending):
+            with self.assertRaises(DeliveryPending) as raised:
                 adapter.get_workflow_runs({'id': 77, 'full_name': 'fixture/project'}, 'b' * 40, 'main', 'push')
+            self.assertEqual(raised.exception.reason, 'remote_pagination_unauthorized')  # A deadline cannot impersonate the rejected next-page origin.
             self.assertEqual(len(actual_http.paths), 2)  # Credentials never leave the configured repository origin/endpoint.
 
     def test_real_http_pagination_caps_counts_duplicates_and_query_changes(self):
@@ -358,8 +366,8 @@ class DeliveryTests(unittest.TestCase):
                     return
                 self.send_response(200)
                 self.end_headers()
-                if self.path == '/slow':
-                    for _ in range(40):
+                if self.path in {'/slow', '/stream'}:
+                    for _ in range(400 if self.path == '/stream' else 40):
                         try:
                             self.wfile.write(b'x')
                             self.wfile.flush()
@@ -376,14 +384,20 @@ class DeliveryTests(unittest.TestCase):
         self.addCleanup(server.shutdown)
         transport = BoundedHTTPTransport()
         origin = 'http://127.0.0.1:' + str(server.server_port)
-        self.assertEqual(transport(Request(origin + '/ok'), timeout=3, max_bytes=100)['body'], b'{"ok":true}')
-        self.assertEqual(transport(Request(origin + '/redirect'), timeout=3, max_bytes=100)['status'], 302)
+        self.assertEqual(transport(Request(origin + '/ok'), timeout=10, max_bytes=100)['body'], b'{"ok":true}')  # Use the production default for positive controls, including Windows worker startup.
+        self.assertEqual(transport(Request(origin + '/redirect'), timeout=10, max_bytes=100)['status'], 302)
         self.assertNotIn(('/forbidden', 'GET'), captured)
         started = time.monotonic()
         with self.assertRaises(DeliveryPending) as raised:
             transport(Request(origin + '/slow'), timeout=0.4, max_bytes=100)
         self.assertEqual(raised.exception.reason, 'http_request_deadline')
         self.assertLess(time.monotonic() - started, 2)
+        started = time.monotonic()
+        with self.assertRaises(DeliveryPending) as streaming:
+            transport(Request(origin + '/stream'), timeout=10, max_bytes=1000)
+        self.assertEqual(streaming.exception.reason, 'http_request_deadline')
+        self.assertIn(('/stream', 'GET'), captured)  # Prove the worker reached an actively trickling response, rather than expiring during startup.
+        self.assertLess(time.monotonic() - started, 12)  # The production request budget also bounds the complete streaming operation.
 
     def test_delivery_and_professional_sources_are_rechecked_after_remote_reads(self):
         store = self.ready()
@@ -437,8 +451,10 @@ class DeliveryTests(unittest.TestCase):
         self.assertTrue(self.sync.sync_once(store).get('delivery_eligible'))
         for status, conclusion in (('queued', None), ('in_progress', None), ('completed', 'failure')):
             newer.update(status=status, conclusion=conclusion)
+            self.github.jobs[1].update(status=status, conclusion=conclusion)  # A newer pending/failed configured job blocks qualification independently of optional aggregate state.
             self.assertFalse(self.sync.sync_once(store).get('delivery_eligible', False))
         newer.update(status='completed', conclusion='success')
+        self.github.jobs[1].update(status='completed', conclusion='success')  # Isolate the subsequent attempt-change race from a required-job pending/failure result.
         self.github.detail_reads = 0
         self.github.on_recheck = {'run_attempt': 3, 'status': 'queued', 'conclusion': None}
         self.assertFalse(self.sync.sync_once(store).get('delivery_eligible', False))
@@ -481,6 +497,34 @@ class DeliveryTests(unittest.TestCase):
             self.github.runs[0].update(change)
             self.assertFalse(self.sync.sync_once(store).get('delivery_eligible', False))
             self.github.runs[0] = original_run
+        self.assertEqual(self.github.writes, [])
+
+    def test_unconfigured_job_failure_does_not_veto_successful_required_matrix(self):
+        store = self.ready()  # Real temporary RunStore; professional assertions remain explicitly synthetic.
+        before = store.path.read_bytes()
+        self.github.runs[0]['conclusion'] = 'failure'  # The workflow aggregate reflects an optional advisory failure.
+        self.github.jobs.append({**self.github.jobs[0], 'id': 403, 'name': 'optional-advisory', 'conclusion': 'failure'})
+        result = self.sync.sync_once(store)
+        self.assertTrue(result.get('delivery_eligible'))  # Only the configured Windows/Ubuntu requirements decide successful checks.
+        self.assertEqual({check['job'] for check in result['delivery']['ci']},
+                         {'check (windows-latest)', 'check (ubuntu-latest)'})
+        self.assertEqual(store.path.read_bytes(), before)  # Qualification cannot rewrite professional execution authority.
+        self.assertEqual(self.github.writes, [])
+
+    def test_unfinished_optional_job_does_not_add_a_workflow_completion_requirement(self):
+        store = self.ready()  # The configured matrix has completed in this exact latest attempt.
+        before = store.path.read_bytes()
+        self.github.runs[0].update(status='in_progress', conclusion=None)
+        required = copy.deepcopy(self.github.jobs)
+        for status in ('queued', 'in_progress'):
+            with self.subTest(optional_status=status):
+                self.github.jobs = required + [{**required[0], 'id': 403, 'name': 'optional-advisory', 'status': status, 'conclusion': None}]
+                self.assertTrue(self.sync.sync_once(store).get('delivery_eligible'))  # Optional work cannot silently become another configured completion obligation.
+        for status in ('queued', 'in_progress'):
+            self.github.jobs = copy.deepcopy(required)
+            self.github.jobs[1].update(status=status, conclusion=None)  # A configured job still owes its own completion even when the aggregate is already in progress.
+            self.assertFalse(self.sync.sync_once(store).get('delivery_eligible', False))
+        self.assertEqual(store.path.read_bytes(), before)
         self.assertEqual(self.github.writes, [])
 
 

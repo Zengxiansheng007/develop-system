@@ -90,9 +90,7 @@ def qualify_ci(github, repository, config, sha):
         current = github.get_workflow_run(repository, run['id'])
         if not same(current):
             raise DeliveryPending('required_ci_changed_during_read')  # List and current-run observations must agree.
-        if run.get('status') != 'completed' or run.get('conclusion') != 'success':
-            raise DeliveryPending('required_ci_not_successful')
-        jobs = github.get_attempt_jobs(repository, run['id'], run['run_attempt'])
+        jobs = github.get_attempt_jobs(repository, run['id'], run['run_attempt'])  # Only configured jobs supply completion/success requirements; aggregate run state includes optional work.
         for name in names:
             found = [job for job in jobs if job.get('name') == name]
             if len(found) != 1:
