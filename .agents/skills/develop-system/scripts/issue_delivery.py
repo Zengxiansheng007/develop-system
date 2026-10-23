@@ -6,10 +6,11 @@ from pathlib import Path, PurePosixPath
 
 
 class DeliveryPending(Exception):
-    def __init__(self, reason, *, retry_not_before=None):
+    def __init__(self, reason, *, retry_not_before=None, service_scope=None):
         super().__init__(reason)  # Only static, safe reason codes cross the journal boundary.
         self.reason = reason
         self.retry_not_before = retry_not_before
+        self.service_scope = service_scope  # Optional safe ownership/resource facts, never credentials or raw headers.
 
 
 def verify_contents(github, repository, binding, state, commits):

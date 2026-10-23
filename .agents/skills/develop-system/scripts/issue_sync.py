@@ -23,6 +23,16 @@ def fingerprint(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':')).encode()).hexdigest()  # Stable references contain no credentials.
 
 
+def validate_service_wait(value):
+    if (not isinstance(value, dict) or set(value) != {'schema_version', 'host', 'connection_reference', 'resource', 'retry_not_before'}
+            or type(value['schema_version']) is not int or value['schema_version'] != 1
+            or value['host'] != 'api.github.com' or value['resource'] != 'core'
+            or not isinstance(value['connection_reference'], str) or not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9_.-]{0,99}', value['connection_reference'])
+            or type(value['retry_not_before']) not in (int, float) or not math.isfinite(value['retry_not_before'])):
+        raise ValueError('Unknown or unsupported Issue service waiting scope')  # Additive progress metadata cannot import credentials, unknown versions or arbitrary service ownership.
+    return value
+
+
 def validate_config(value):
     fields = {'schema_version', 'enabled', 'project_id', 'github_host', 'repository', 'target_branch',
               'required_ci', 'remove_labels', 'connection_reference', 'body_policy'}  # Reject unreviewed or credential-bearing fields.
@@ -163,7 +173,30 @@ class IssueSync:
         if any(not isinstance(binding, dict) or type(binding.get('schema_version')) is not int
                 or binding['schema_version'] != 1 for binding in journal['bindings']):
             raise ValueError('Unknown Issue sync binding version')  # Validate every nested record before any consumer exposes, selects or rewrites it.
+        for binding in journal['bindings']:
+            if isinstance(binding.get('progress'), dict) and 'service_wait' in binding['progress']:
+                validate_service_wait(binding['progress']['service_wait'])  # Old progress without this optional marker remains compatible.
         return journal  # This file contains remote progress and references, never professional verdicts.
+
+    def _capture_service_wait(self, progress, error):
+        if error.reason == 'rate_limited' and error.service_scope is not None and error.retry_not_before is not None:
+            progress['service_wait'] = validate_service_wait({'schema_version': 1, **error.service_scope,
+                'retry_not_before': error.retry_not_before})  # Persist only safe recognized response facts, retaining the original absolute deadline.
+
+    def _shared_service_wait(self, journal, connection_reference):
+        waits = [binding['progress']['service_wait'] for binding in journal['bindings']
+                 if isinstance(binding.get('progress'), dict) and 'service_wait' in binding['progress']
+                 and binding['progress']['service_wait']['connection_reference'] == connection_reference
+                 and binding['progress']['service_wait']['retry_not_before'] > self.clock()]
+        return max(waits, key=lambda value: value['retry_not_before']) if waits else None  # Read only already-known synchronization progress; never scan or control development runs.
+
+    def _hold_service_wait(self, journal, binding, wait):
+        progress = {**copy.deepcopy(binding['progress']), 'status': 'pending', 'reason': 'rate_limited',
+            'delivery_eligible': False, 'retry_not_before': wait['retry_not_before'], 'service_wait': copy.deepcopy(wait)}
+        if binding['progress'].get('status') == 'human_paused':
+            progress['human_pause'] = copy.deepcopy(binding['progress'].get('human_pause') or {'reason': 'independent_human_pause'})  # A service hold cannot erase a separate legacy human control.
+        self._publish_progress(journal, binding, progress)  # Retain operations/body/human controls while explaining why this pool-dependent ticket cannot request yet.
+        return {**progress, 'ticket_id': binding['ticket_id'], 'binding_id': binding['binding_id']}
 
     def _state(self, store):
         from workflow_state import RunStore  # The public entry consumes the actual execution authority.
@@ -242,6 +275,9 @@ class IssueSync:
             raise ValueError('Explicit parent specification marker must be boolean')  # References or child counts never infer the parent's role.
         config = configuration(self.project)['configuration']
         repository = config['repository']
+        waiting = self._shared_service_wait(self._journal(), config['connection_reference'])
+        if waiting is not None:
+            raise DeliveryPending('rate_limited', retry_not_before=waiting['retry_not_before'])  # Binding reads cannot bypass a known applicable pool wait.
         if (not isinstance(final_pr, dict) or set(final_pr) != {'number', 'repository_id'}
                 or type(final_pr['number']) is not int or final_pr['number'] <= 0
                 or type(final_pr['repository_id']) is not int or final_pr['repository_id'] != repository['id']):
@@ -706,6 +742,13 @@ class IssueSync:
             if waiting is not None:
                 return waiting  # Do not even initialize a replaced/unavailable connection while its ticket must wait.
         config = configuration(self.project)['configuration']
+        if len(selected) == 1:
+            with self._locked():
+                journal = self._journal()
+                current = next(b for b in journal['bindings'] if b['binding_id'] == selected[0]['binding_id'])
+                waiting = self._shared_service_wait(journal, config['connection_reference'])
+                if waiting is not None:
+                    return self._hold_service_wait(journal, current, waiting)  # Reentry/new Adapter checks known shared deadlines before credential-provider initialization.
         try:
             with self.github.round(config['connection_reference']) if hasattr(self.github, 'round') else nullcontext():
                 return self._sync_once(store, ticket_id=ticket_id, explicit_continue=explicit_continue, takeover_reference=takeover_reference, body_resolution=body_resolution)  # One finite Adapter round covers qualification, writes and final requalification.
@@ -717,6 +760,7 @@ class IssueSync:
                 progress.update(status='pending', reason=exc.reason, delivery_eligible=False)  # Connection failures cannot discard an already persisted wait or operation history.
                 if exc.retry_not_before is not None:
                     progress['retry_not_before'] = exc.retry_not_before
+                self._capture_service_wait(progress, exc)
                 if len(selected) == 1:
                     for key in ('operations', 'body_conflict', 'human_pause'):
                         if key in selected[0]['progress']:
@@ -741,6 +785,9 @@ class IssueSync:
             waiting = self._service_wait(binding)
             if waiting is not None:
                 return waiting  # Recheck under ownership before events, PR/CI, body reads or takeover validation.
+            waiting = self._shared_service_wait(journal, configuration(self.project)['configuration']['connection_reference'])
+            if waiting is not None:
+                return self._hold_service_wait(journal, binding, waiting)  # A concurrently published known wait is checked again before any remote request.
             prior_progress = copy.deepcopy(binding['progress'])
             try:
                 if self._observe_intervention(journal, binding, prior_progress,
@@ -751,6 +798,7 @@ class IssueSync:
                 prior_progress.update(status='pending', reason=exc.reason, delivery_eligible=False)
                 if exc.retry_not_before is not None:
                     prior_progress['retry_not_before'] = exc.retry_not_before  # History failures carry the same service wait as every other Adapter request.
+                self._capture_service_wait(prior_progress, exc)
                 self._publish_progress(journal, binding, prior_progress)
                 return {**prior_progress, 'ticket_id': binding['ticket_id'], 'binding_id': binding['binding_id']}
             delivery = None  # Facts from a previous round never bypass a fresh PR/CI read.
@@ -779,6 +827,7 @@ class IssueSync:
                     reason = exc.reason  # Read failures remain local synchronization pending, not professional failures.
                     if exc.retry_not_before is not None:
                         delivery = {'retry_not_before': exc.retry_not_before}
+                        self._capture_service_wait(delivery, exc)
             if delivery and delivery.get('delivery_eligible'):
                 latest_state = self._state(store)
                 latest_projection = store.acceptance_projection(binding['ticket_id'])  # Remote waits cannot freeze professional currentness.
@@ -798,6 +847,7 @@ class IssueSync:
                     reason = exc.reason
                     if exc.retry_not_before is not None:
                         delivery = {'retry_not_before': exc.retry_not_before}  # Never read beyond a newly returned service-wait boundary.
+                        self._capture_service_wait(delivery, exc)
             progress = {'status': 'pending', 'reason': reason,
                         'qualification_reason': projection.get('reason') if not projection['eligible'] else None,
                         'operations': copy.deepcopy(binding['progress'].get('operations', []))}  # New missing prerequisites never erase confirmed or failed remote history.
@@ -816,6 +866,7 @@ class IssueSync:
                     progress['reason'] = exc.reason  # A partial mutation remains pending until every readback matches.
                     if exc.retry_not_before is not None:
                         progress['retry_not_before'] = exc.retry_not_before
+                    self._capture_service_wait(progress, exc)
                 except (ValueError, TypeError, KeyError):
                     progress['reason'] = 'remote_material_invalid'
             if binding.get('intervention', {}).get('status') == 'manual_paused':

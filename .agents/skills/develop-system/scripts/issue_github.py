@@ -71,7 +71,7 @@ def http_worker():
         with response:
             status = response.getcode()
             headers = {key.lower(): value for key, value in response.headers.items()
-                       if key.lower() in {'link', 'retry-after', 'x-ratelimit-reset', 'x-ratelimit-remaining'}}
+                       if key.lower() in {'link', 'retry-after', 'x-ratelimit-reset', 'x-ratelimit-remaining', 'x-ratelimit-resource'}}  # Preserve the safe resource name needed to qualify a shared primary pool.
             body = response.read(payload['max_bytes'] + 1) if status == 200 or status in {403, 429} else b''
         if len(body) > payload['max_bytes']:
             return {'error': 'http_response_too_large'}
@@ -164,7 +164,15 @@ class GitHubReadAdapter:
                 except ValueError:
                     pass
                 wait = max([now, *waits]) if waits else now + 60
-                raise DeliveryPending('rate_limited', retry_not_before=wait)  # Record the future boundary and return; no sleep or retry loop.
+                scope = None
+                if headers.get('x-ratelimit-remaining') == '0' and headers.get('x-ratelimit-resource') == 'core':
+                    try:
+                        reset = float(headers.get('x-ratelimit-reset', ''))
+                        if math.isfinite(reset) and reset > now:
+                            scope = {'host': 'api.github.com', 'connection_reference': self.connection_reference, 'resource': 'core'}  # Only an explicitly exhausted supported pool is shared; no token/actor inference.
+                    except ValueError:
+                        pass  # Unknown scope retains the original ticket-local waiting contract.
+                raise DeliveryPending('rate_limited', retry_not_before=wait, service_scope=scope)  # Record the absolute boundary; no sleep or retry loop.
             if type(status) is int and 300 <= status < 400:
                 reason = 'http_redirect_refused'
             raise DeliveryPending(reason)

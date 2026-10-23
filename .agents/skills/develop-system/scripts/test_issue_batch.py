@@ -54,6 +54,11 @@ class BatchGitHub(write_fixtures.WritableGitHub):
 
 class BatchHTTP(write_fixtures.MutationHTTP):
     """Actual loopback HTTP Issue traffic for multiple independently identified tickets."""
+    def __init__(self, fixture, *, limit_on=None, wall_clock=None, connection_reference='fixture-connection'):
+        super().__init__(fixture)
+        self.limit_on, self.wall_clock, self.token_reads = limit_on, wall_clock, 0  # Control only HTTP service facts and the clock at the external boundary.
+        self.connection_reference = connection_reference  # Distinct configured test references model independent authenticated service pools.
+
     def __enter__(self):
         from issue_github import GitHubIssueAdapter, BoundedHTTPTransport
         boundary = self
@@ -67,6 +72,16 @@ class BatchHTTP(write_fixtures.MutationHTTP):
                 value = json.loads(raw) if raw else None
                 path = urlsplit(self.path).path
                 boundary.requests.append((self.command, path, value))  # Observe exact per-ticket HTTP routing.
+                limited = boundary.limit_on(self.command, path) if boundary.limit_on else None
+                if limited:
+                    encoded = b'{"message":"synthetic primary rate limit"}'
+                    self.send_response(429)
+                    for name, content in limited.items():
+                        self.send_header(name, content)  # Real HTTP response headers drive production rate-limit parsing.
+                    self.send_header('Content-Length', str(len(encoded)))
+                    self.end_headers()
+                    self.wfile.write(encoded)
+                    return
                 try:
                     if path == '/repos/fixture/project':
                         result = repository
@@ -104,7 +119,11 @@ class BatchHTTP(write_fixtures.MutationHTTP):
             parsed = urlsplit(request.full_url)
             local = 'http://127.0.0.1:' + str(self.server.server_port) + parsed.path + ('?' + parsed.query if parsed.query else '')
             return BoundedHTTPTransport()(Request(local, headers=dict(request.header_items()), method=request.get_method(), data=request.data), **limits)  # Only the test transport rewrites origin.
-        self.adapter = GitHubIssueAdapter(connection_reference='fixture-connection', token_provider=lambda _: 'synthetic-token', transport=transport)
+        def token_provider(reference):
+            self.token_reads += 1
+            return 'synthetic-token' if reference == 'fixture-connection' else 'synthetic-independent-token'  # Only in-memory synthetic credentials; no real account is contacted.
+        self.adapter = GitHubIssueAdapter(connection_reference=self.connection_reference, token_provider=token_provider, transport=transport,
+            **({'wall_clock': self.wall_clock} if self.wall_clock is not None else {}))
         return self
 
 
@@ -369,6 +388,127 @@ class BatchTests(unittest.TestCase):
             self.assertEqual(boundary.errors, [])
             self.assertEqual(IssueSync(self.project, boundary).continue_sync(historical)['status'], 'unmanaged')
         self.assertEqual({p.name: p.read_bytes() for p in historical.path.parent.iterdir() if p.is_file()}, old_bytes)
+        self.assertEqual(self.authority_bytes(), before)
+
+    def test_primary_core_wait_blocks_next_ticket_and_explicit_reentry(self):
+        self.prepare()
+        self.finish_ticket('first', ['1'])
+        self.finish_ticket('second', ['2', '3'])
+        self.bind_all()
+        now = [2000000000.0]  # Controlled UTC seconds avoid real service sleeping.
+        def limit_on(method, path):
+            return {'Retry-After': '3600', 'X-RateLimit-Remaining': '0', 'X-RateLimit-Reset': str(int(now[0] + 7200)),
+                'X-RateLimit-Resource': 'core'} if path.endswith('/issues/15') else None  # An explicitly exhausted shared core pool, not an arbitrary429.
+        before = self.authority_bytes()
+        with BatchHTTP(self.github, limit_on=limit_on, wall_clock=lambda: now[0]) as boundary:
+            result = IssueSync(self.project, boundary, clock=lambda: now[0]).sync_once(self.store)
+            first_limit = next(i for i, (_, path, _) in enumerate(boundary.requests) if path.endswith('/issues/15'))
+            self.assertEqual(boundary.requests[first_limit + 1:], [])  # Another Issue number cannot bypass the known same-connection pool deadline.
+            self.assertEqual([r['reason'] for r in result['tickets']], ['rate_limited', 'rate_limited'])
+            self.assertEqual([r['retry_not_before'] for r in result['tickets']], [2000007200.0, 2000007200.0])
+            requests, connections = len(boundary.requests), boundary.token_reads
+            continued = IssueSync(self.project, boundary, clock=lambda: now[0]).continue_sync(self.store)
+            self.assertEqual([r['reason'] for r in continued['tickets']], ['rate_limited', 'rate_limited'])
+            self.assertEqual((len(boundary.requests), boundary.token_reads), (requests, connections))  # New module instance checks locally before connection or remote events.
+            with self.assertRaises(DeliveryPending) as held:
+                IssueSync(self.project, boundary, clock=lambda: now[0]).bind(self.store, issue_number=16,
+                    final_pr={'number': 13, 'repository_id': 77}, acceptance_map={i: {'text': self.criteria[int(i) - 1], 'context': ''} for i in ['2', '3']})
+            self.assertEqual((held.exception.reason, held.exception.retry_not_before), ('rate_limited', 2000007200.0))
+            self.assertEqual((len(boundary.requests), boundary.token_reads), (requests, connections))  # The binding consumer also obeys the already known same-pool deadline.
+        with BatchHTTP(self.github, wall_clock=lambda: now[0]) as fresh_boundary:
+            result = IssueSync(self.project, fresh_boundary, clock=lambda: now[0]).continue_sync(self.store)
+            self.assertEqual([r['reason'] for r in result['tickets']], ['rate_limited', 'rate_limited'])
+            self.assertEqual((fresh_boundary.requests, fresh_boundary.token_reads), ([], 0))  # Persistence, not the previous Adapter object's memory, retains the wait.
+        self.assertEqual(self.github.actions, [])
+        self.assertEqual(self.authority_bytes(), before)
+
+    def test_shared_core_expiry_rechecks_current_sources_and_ci_before_mutations(self):
+        self.prepare()
+        self.finish_ticket('first', ['1'])
+        self.finish_ticket('second', ['2', '3'])
+        self.bind_all()
+        now = [2000000000.0]
+        def limit_on(method, path):
+            return {'Retry-After': '60', 'X-RateLimit-Remaining': '0', 'X-RateLimit-Reset': '2000000060',
+                'X-RateLimit-Resource': 'core'} if path.endswith('/issues/15') else None  # A real short future wait is advanced by clock, never slept.
+        before = self.authority_bytes()
+        accepted = (self.project / 'first.py').read_bytes()
+        with BatchHTTP(self.github, limit_on=limit_on, wall_clock=lambda: now[0]) as boundary:
+            first = IssueSync(self.project, boundary, clock=lambda: now[0]).sync_once(self.store)
+            self.assertEqual([r['reason'] for r in first['tickets']], ['rate_limited', 'rate_limited'])
+            boundary.limit_on, now[0] = None, 2000000061.0  # Service recovers after its fixed absolute deadline.
+            (self.project / 'first.py').write_bytes(b'value = -1  # Later unaccepted first ticket.\n')
+            self.github.jobs[0]['conclusion'] = 'failure'  # Other ticket's previously green PR/CI observations are now stale.
+            second = IssueSync(self.project, boundary, clock=lambda: now[0]).continue_sync(self.store)
+            self.assertEqual([r['reason'] for r in second['tickets']], ['acceptance_pending', 'required_ci_not_successful'])
+            self.assertEqual(self.github.actions, [])  # Expiry does not replay writes or waive current source/CI.
+            (self.project / 'first.py').write_bytes(accepted)
+            self.github.jobs[0]['conclusion'] = 'success'
+            third = IssueSync(self.project, boundary, clock=lambda: now[0]).continue_sync(self.store)
+            self.assertEqual([r['status'] for r in third['tickets']], ['synced', 'synced'])
+            self.assertEqual(self.github.actions, [(15, 'body'), (15, 'label'), (15, 'close'), (16, 'body'), (16, 'label'), (16, 'close')])
+            self.assertEqual(boundary.errors, [])
+        self.assertEqual(self.authority_bytes(), before)
+
+    def test_known_wait_does_not_block_new_authorized_independent_connection(self):
+        from workflow_state import RunStore
+        self.prepare()
+        self.finish_ticket('first', ['1'])
+        self.finish_ticket('second', ['2', '3'])
+        self.bind_all()
+        now = [2000000000.0]
+        def limit_on(method, path):
+            return {'Retry-After': '3600', 'X-RateLimit-Remaining': '0', 'X-RateLimit-Reset': '2000003600',
+                'X-RateLimit-Resource': 'core'} if path.endswith('/issues/15') else None
+        with BatchHTTP(self.github, limit_on=limit_on, wall_clock=lambda: now[0]) as boundary:
+            self.assertEqual([r['reason'] for r in IssueSync(self.project, boundary, clock=lambda: now[0]).sync_once(self.store)['tickets']], ['rate_limited', 'rate_limited'])
+        original_store, original_bytes = self.store, self.authority_bytes()
+        config = {**self.config, 'connection_reference': 'independent-connection'}
+        self.sync.configure(config, user_reference='synthetic independent connection and new-run enablement')  # A new explicitly authorized generation never adopts the original run.
+        raw = b'value = 17  # Synthetic independently accepted candidate.\n'
+        (self.project / 'independent.py').write_bytes(raw)
+        for files in self.github.files.values():
+            files['independent.py'] = raw
+        self.github.issues[17] = {**copy.deepcopy(self.github.issue), 'id': 503, 'number': 17,
+            'body': '## Acceptance criteria\n\n- [ ] independent behavior'}
+        self.github.histories[17] = []
+        self.store = RunStore(self.project, 'independent-run')
+        self.store.create('synthetic independent run', [{'step_id': 'independent', 'skill_id': 'research'}], ['independent behavior'], self.registry,
+            ticket_scopes=[{'ticket_id': '77:503', 'acceptance_ids': ['1'], 'required_steps': ['independent'],
+                'input_version': 'independent-v1', 'candidate_paths': ['independent.py']}])  # Real new creation, not a resumed old run or forged passed flag.
+        self.finish_ticket('independent', ['1'])
+        self.sync.bind(self.store, issue_number=17, final_pr={'number': 13, 'repository_id': 77},
+            acceptance_map={'1': {'text': 'independent behavior', 'context': ''}})
+        independent_before = self.authority_bytes()
+        with BatchHTTP(self.github, wall_clock=lambda: now[0], connection_reference='independent-connection') as boundary:
+            self.assertEqual(IssueSync(self.project, boundary, clock=lambda: now[0]).sync_once(self.store)['status'], 'synced')
+            self.assertGreater(boundary.token_reads, 0)
+        self.assertEqual(self.github.actions, [(17, 'body'), (17, 'label'), (17, 'close')])  # The other pool is usable while original tickets remain untouched.
+        self.assertEqual(self.authority_bytes(), independent_before)
+        self.store = original_store
+        self.assertEqual(self.authority_bytes(), original_bytes)
+
+    def test_unknown_persisted_shared_wait_version_is_pending_without_requests(self):
+        self.prepare()
+        self.finish_ticket('first', ['1'])
+        self.finish_ticket('second', ['2', '3'])
+        self.bind_all()
+        now = [2000000000.0]
+        def limit_on(method, path):
+            return {'Retry-After': '60', 'X-RateLimit-Remaining': '0', 'X-RateLimit-Reset': '2000000060',
+                'X-RateLimit-Resource': 'core'} if path.endswith('/issues/15') else None
+        before = self.authority_bytes()
+        with BatchHTTP(self.github, limit_on=limit_on, wall_clock=lambda: now[0]) as boundary:
+            IssueSync(self.project, boundary, clock=lambda: now[0]).sync_once(self.store)  # Produce the recognized persisted record through the actual public seam.
+        path = self.project / '.develop-system/issue-sync/bindings.json'
+        journal = json.loads(path.read_text(encoding='utf-8'))
+        journal['bindings'][0]['progress']['service_wait']['schema_version'] = 2
+        path.write_text(json.dumps(journal), encoding='utf-8')  # Simulate an unsupported external progress format, never modify execution authority or invent passed acceptance.
+        with BatchHTTP(self.github, wall_clock=lambda: now[0]) as boundary:
+            result = IssueSync(self.project, boundary, clock=lambda: now[0]).continue_sync(self.store)
+            self.assertEqual((result['status'], result['reason']), ('pending', 'local_record_invalid'))
+            self.assertEqual((boundary.requests, boundary.token_reads), ([], 0))
+        self.assertEqual(self.github.actions, [])
         self.assertEqual(self.authority_bytes(), before)
 
 
