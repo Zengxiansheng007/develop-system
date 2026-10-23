@@ -212,14 +212,20 @@ class GitHubReadAdapter:
         items, identifiers, total = [], set(), None
         for page in range(1, self.max_pages + 1):
             value, headers = self._request(url)
-            if (not isinstance(value, dict) or type(value.get('total_count')) is not int or value['total_count'] < 0
-                    or not isinstance(value.get(key), list)):
-                raise DeliveryPending('remote_pagination_incomplete')
-            if total is None:
-                total = value['total_count']
-            if value['total_count'] != total or (search and total >= 1000):
-                raise DeliveryPending('remote_pagination_incomplete')  # GitHub's filtered Actions search cap cannot prove completeness.
-            for item in value[key]:
+            if key is None:
+                if not isinstance(value, list):
+                    raise DeliveryPending('remote_pagination_incomplete')
+                page_items = value  # Issue events use a bare array and Link, without an invented total_count.
+            else:
+                if (not isinstance(value, dict) or type(value.get('total_count')) is not int or value['total_count'] < 0
+                        or not isinstance(value.get(key), list)):
+                    raise DeliveryPending('remote_pagination_incomplete')
+                if total is None:
+                    total = value['total_count']
+                if value['total_count'] != total or (search and total >= 1000):
+                    raise DeliveryPending('remote_pagination_incomplete')  # GitHub's filtered Actions search cap cannot prove completeness.
+                page_items = value[key]
+            for item in page_items:
                 if not isinstance(item, dict) or type(item.get('id')) is not int or item['id'] <= 0 or item['id'] in identifiers:
                     raise DeliveryPending('remote_pagination_incomplete')
                 identifiers.add(item['id'])
@@ -234,7 +240,7 @@ class GitHubReadAdapter:
             if len(next_pages) > 1:
                 raise DeliveryPending('remote_pagination_incomplete')
             if not next_pages:
-                if len(items) != total:
+                if key is not None and len(items) != total:
                     raise DeliveryPending('remote_pagination_incomplete')
                 return items
             candidate = urljoin(url, next_pages[0])
@@ -246,6 +252,9 @@ class GitHubReadAdapter:
                 raise DeliveryPending('remote_pagination_unauthorized')  # Reject origin, repository, endpoint and query widening before credentials.
             url = candidate
         raise DeliveryPending('http_page_budget_exhausted')
+
+    def get_issue_events(self, repository, number):
+        return self._pages(repository, '/issues/' + self._number(number) + '/events', None)  # The same finite origin/query/page guards cover native event arrays.
 
     def get_issue(self, repository, number):
         value = self._get(repository, '/issues/' + self._number(number))
@@ -265,7 +274,8 @@ class GitHubReadAdapter:
         return {'id': value.get('id'), 'number': value.get('number'), 'repository_id': target.get('id'),
                 'repository_full_name': target.get('full_name'), 'type': 'pull_request', 'base_ref': base.get('ref'),
                 'merged': value.get('merged'), 'merged_at': value.get('merged_at'),
-                'head_sha': (value.get('head') or {}).get('sha'), 'merge_commit_sha': value.get('merge_commit_sha')}
+                'head_sha': (value.get('head') or {}).get('sha'), 'merge_commit_sha': value.get('merge_commit_sha'),
+                'body': value.get('body')}  # Observe native-closing conflicts without editing or exporting the author's description.
 
     def get_commit_tree(self, repository, sha):
         value = self._get(repository, '/commits/' + self._sha(sha))

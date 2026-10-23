@@ -29,9 +29,10 @@ class PersistentGitHub(write_fixtures.WritableGitHub):
         if self.path.exists():
             value = json.loads(self.path.read_text(encoding='utf-8'))
             self.issue, self.writes, self.trace = value['issue'], value['writes'], value['trace']
+            self.events = value.get('events', [])  # New independent processes observe the same synthetic remote event history.
 
     def publish(self):
-        self.path.write_text(json.dumps({'issue': self.issue, 'writes': self.writes, 'trace': self.trace}), encoding='utf-8')  # Only external fixture facts, never execution authority.
+        self.path.write_text(json.dumps({'issue': self.issue, 'writes': self.writes, 'trace': self.trace, 'events': self.events}), encoding='utf-8')  # Only external fixture facts, never execution authority.
 
     def stop(self):
         if self.hard_exit:

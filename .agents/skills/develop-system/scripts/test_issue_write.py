@@ -5,7 +5,7 @@ import json
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlsplit, unquote
+from urllib.parse import urlsplit, unquote, parse_qs
 from urllib.request import Request
 
 from issue_sync import IssueSync
@@ -19,6 +19,10 @@ class WritableGitHub(delivery_fixtures.DeliveryGitHub):
                           title='Keep title', assignees=[{'login': 'human'}], milestone={'number': 4})
         self.before_write = None  # Observe durable intent at the external request boundary.
         self.after_write, self.on_read, self.reads = None, None, 0
+        self.events = []  # Synthetic remote history is separate from the local operation journal.
+
+    def get_issue_events(self, repository, number):
+        return copy.deepcopy(self.events)
 
     def get_issue(self, repository, number):
         self.reads += 1
@@ -48,6 +52,8 @@ class WritableGitHub(delivery_fixtures.DeliveryGitHub):
             self.before_write('close', None)
         self.writes.append(('close', None))
         self.issue.update(state='closed', state_reason='completed')
+        self.events.append({'id': 700 + len(self.events), 'node_id': 'event-' + str(len(self.events)),
+                            'event': 'closed', 'created_at': '2026-10-23T01:00:00Z'})  # Actual API event fields, never an invented operation ID.
         if self.after_write:
             self.after_write('close')
         return copy.deepcopy(self.issue)
@@ -55,12 +61,14 @@ class WritableGitHub(delivery_fixtures.DeliveryGitHub):
 
 class MutationHTTP:
     """External delivery facts plus real HTTP Issue reads/writes, without private production mocks."""
-    def __init__(self, fixture, *, error_status=None, corrupt_body=False, missing_labels=False, read_only=False, malformed_kind=None):
+    def __init__(self, fixture, *, error_status=None, corrupt_body=False, missing_labels=False, read_only=False, malformed_kind=None,
+                 event_page_size=100, event_error_status=None, event_link_origin=None):
         self.fixture, self.error_status, self.corrupt_body = fixture, error_status, corrupt_body
         self.requests, self.errors = [], []
         self.missing_labels = missing_labels  # A malformed/incomplete response cannot prove removable-label state.
         self.read_only = read_only
         self.malformed_kind = malformed_kind  # Simulate an applied mutation whose actual HTTP response cannot be decoded.
+        self.event_page_size, self.event_error_status, self.event_link_origin = event_page_size, event_error_status, event_link_origin
 
     def __enter__(self):
         from issue_github import GitHubReadAdapter, GitHubIssueAdapter, BoundedHTTPTransport
@@ -81,6 +89,17 @@ class MutationHTTP:
                         result = {'message': 'synthetic-token private-path raw-error'}
                     elif self.path == '/repos/fixture/project':
                         result = {'id': 77, 'full_name': 'fixture/project'}
+                    elif urlsplit(self.path).path.endswith('/events'):
+                        query = parse_qs(urlsplit(self.path).query)
+                        page = int(query.get('page', ['1'])[0])
+                        events = boundary.fixture.get_issue_events({'id': 77, 'full_name': 'fixture/project'}, 15)
+                        start = (page - 1) * boundary.event_page_size
+                        result = events[start:start + boundary.event_page_size]
+                        if start + len(result) < len(events):
+                            origin = boundary.event_link_origin or 'https://api.github.com'
+                            headers['Link'] = '<' + origin + '/repos/fixture/project/issues/15/events?per_page=100&page=' + str(page + 1) + '>; rel="next"'
+                        if boundary.event_error_status:
+                            status, result = boundary.event_error_status, {'message': 'synthetic-token raw-event-error'}
                     else:
                         repository = {'id': 77, 'full_name': 'fixture/project'}
                         if self.command == 'PATCH' and set(value) == {'body'}:
@@ -116,14 +135,14 @@ class MutationHTTP:
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         def transport(request, **limits):
             parsed = urlsplit(request.full_url)
-            local = 'http://127.0.0.1:' + str(self.server.server_port) + parsed.path
+            local = 'http://127.0.0.1:' + str(self.server.server_port) + parsed.path + ('?' + parsed.query if parsed.query else '')  # Preserve real pagination queries at the local wire boundary.
             return BoundedHTTPTransport()(Request(local, headers=dict(request.header_items()), method=request.get_method(), data=request.data), **limits)
         adapter_class = GitHubReadAdapter if self.read_only else GitHubIssueAdapter
         self.adapter = adapter_class(connection_reference='fixture-connection', token_provider=lambda _: 'synthetic-token', transport=transport)
         return self
 
     def __getattr__(self, name):
-        source = self.adapter if name in {'deadline', 'round', 'get_issue', 'update_issue_body', 'remove_issue_label', 'close_issue'} else self.fixture
+        source = self.adapter if name in {'deadline', 'round', 'get_issue', 'get_issue_events', 'update_issue_body', 'remove_issue_label', 'close_issue'} else self.fixture
         return getattr(source, name)  # Compose external read facts at their public API boundary; actual mutations use the real Adapter.
 
     def __exit__(self, *args):
@@ -502,14 +521,14 @@ class IssueWriteTests(unittest.TestCase):
             job['head_sha'] = 'd' * 40  # All current external delivery facts now qualify a different actual merged SHA.
         result = self.sync.sync_once(store)
         self.assertEqual(result['delivery']['sha'], 'd' * 40)
-        self.assertEqual((result['status'], result['reason']), ('pending', 'issue_not_open_or_fields_unavailable'))
+        self.assertEqual((result['status'], result['reason']), ('pending', 'externally_closed_issue'))  # The stricter contract explains an unowned closure explicitly.
         self.assertEqual(self.github.writes, writes)
 
     def test_manual_closed_issue_without_our_confirmed_close_is_not_claimed(self):
         store = self.ready()
         self.github.issue.update(state='closed', state_reason='completed')
         result = self.sync.sync_once(store)
-        self.assertEqual((result['status'], result['reason']), ('pending', 'issue_not_open_or_fields_unavailable'))
+        self.assertEqual((result['status'], result['reason']), ('pending', 'externally_closed_issue'))  # Preserve zero writes while making the external-state reason visible.
         self.assertEqual(self.github.writes, [])
 
     def test_public_sync_http_repeat_recovers_fresh_facts_and_refreshes_same_summary(self):

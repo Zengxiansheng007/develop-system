@@ -262,6 +262,9 @@ class IssueSync:
                        'ticket_id': ticket_id, 'candidate_id': candidate_id,
                        'source_references': projection.get('sources', []),
                        'progress': {'status': 'pending', 'reason': 'final_delivery_unverified' if projection['eligible'] else 'acceptance_pending'}}
+            if existing and existing.get('intervention'):
+                binding['intervention'] = copy.deepcopy(existing['intervention'])
+                binding['progress'] = copy.deepcopy(existing['progress'])  # Rebinding acceptance cannot clear human control or erase remote history.
             if existing:
                 journal['bindings'].remove(existing)
             journal['bindings'].append(binding)
@@ -315,8 +318,64 @@ class IssueSync:
                 and projection.get('candidate_id') == binding['candidate_id']
                 and projection.get('sources') == binding['source_references'])  # Callers supply fresh reads at each distinct stage.
 
+    def _stable_events(self, repository, number):
+        reader = getattr(self.github, 'get_issue_events', None)
+        if not callable(reader):
+            raise DeliveryPending('issue_events_unavailable')  # A current flag or matching account cannot substitute for history.
+        def snapshot():
+            events, identifiers = reader(repository, number), set()
+            if not isinstance(events, list):
+                raise DeliveryPending('issue_events_incomplete')
+            result = []
+            for event in events:
+                if (not isinstance(event, dict) or type(event.get('id')) is not int or event['id'] <= 0
+                        or event['id'] in identifiers or not isinstance(event.get('node_id'), str) or not event['node_id']
+                        or not isinstance(event.get('event'), str) or not event['event']
+                        or not isinstance(event.get('created_at'), str) or not event['created_at']):
+                    raise DeliveryPending('issue_events_incomplete')
+                identifiers.add(event['id'])
+                selected = {k: event[k] for k in ('id', 'node_id', 'event', 'created_at')}
+                if event.get('commit_id') is not None:
+                    if not isinstance(event['commit_id'], str) or not re.fullmatch('[0-9a-f]{40}', event['commit_id']):
+                        raise DeliveryPending('issue_events_incomplete')
+                    selected['commit_id'] = event['commit_id']  # A native closing commit is observable; actor identity still proves nothing.
+                result.append(selected)  # Do not persist actors or remote arbitrary data.
+            return result
+        first, second = snapshot(), snapshot()
+        if first != second:
+            raise DeliveryPending('issue_events_unstable')  # Bounded repeated observations are not a remote snapshot transaction.
+        return first
+
+    def _observe_intervention(self, journal, binding, progress, repository, number):
+        intervention = binding.get('intervention')
+        if intervention and intervention.get('status') == 'manual_paused':
+            progress.update(status='manual_paused', reason='external_reopen_observed')
+            return True  # Persisted ticket control survives qualification and connection changes.
+        if not intervention or not intervention.get('closure'):
+            active = progress.get('operations', [])[binding.get('intervention', {}).get('operation_start', 0):]
+            if any(op['kind'] == 'close' and op['status'] == 'confirmed' for op in active):
+                raise DeliveryPending('close_event_interval_unknown')  # Old acknowledgements without an event association cannot be silently upgraded.
+            return False
+        closure = intervention['closure']
+        events = self._stable_events(repository, number)
+        previous = closure['events']
+        if events[:len(previous)] != previous:
+            raise DeliveryPending('close_event_interval_unknown')
+        reopened = next((event for event in events[len(previous):] if event['event'] == 'reopened'), None)
+        if reopened:
+            intervention.update(status='manual_paused', reopened_event=reopened)
+            progress.update(status='manual_paused', reason='external_reopen_observed')
+            self._publish_progress(journal, binding, progress)  # Human pause is saved even if the Issue has already been closed again.
+            return True
+        return False
+
+    def _external_closure_reason(self, repository, number):
+        events = self._stable_events(repository, number)
+        return ('native_early_close_conflict' if any(event['event'] == 'closed' and event.get('commit_id') for event in events)
+                else 'externally_closed_issue')  # Native commits and unowned closures are reported without taking ownership.
+
     def _reconcile_operations(self, journal, binding, progress, issue, *, explicit_continue=False):
-        for op in progress['operations']:
+        for op in progress['operations'][binding.get('intervention', {}).get('operation_start', 0):]:
             if op['status'] == 'confirmed':
                 continue  # Current effects are checked together below; a newer confirmed summary supersedes an older body value.
             if op['status'] == 'failed':
@@ -355,17 +414,18 @@ class IssueSync:
             return progress  # Existing read-only clients remain qualification-only.
         operations = copy.deepcopy(binding['progress'].get('operations', []))
         progress['operations'] = operations
+        active_operations = operations[binding.get('intervention', {}).get('operation_start', 0):]  # Explicit takeover starts a new effect epoch, preserving prior operations.
         issue = self.github.get_issue(repository, number)
         if self._identity(issue, number, repository, 'issue') != binding['issue']:
             raise DeliveryPending('issue_identity_changed')
         self._reconcile_operations(journal, binding, progress, issue, explicit_continue=explicit_continue)  # A new instance always observes the remote before recovering intent.
         before = issue.get('body')
-        body_operations = [op for op in operations if op['kind'] == 'body' and op['status'] == 'confirmed']
+        body_operations = [op for op in active_operations if op['kind'] == 'body' and op['status'] == 'confirmed']
         known_body = body_operations[-1]['expected_after'] if body_operations else None
         if (not isinstance(before, str) or (body_operations and before != known_body)
                 or (not body_operations and fingerprint(before) != binding['body_baseline_id'])):
             raise DeliveryPending('body_baseline_changed')
-        close = next((op for op in reversed(operations) if op['kind'] == 'close'), None)
+        close = next((op for op in reversed(active_operations) if op['kind'] == 'close'), None)
         already_synced = (close is not None and close['status'] == 'confirmed'
                           and close.get('expected_after') == {'state': 'closed', 'state_reason': 'completed'}
                           and close.get('candidate_id') == binding['candidate_id']
@@ -374,9 +434,11 @@ class IssueSync:
                                or set(issue.get('labels', [])) & set(config['remove_labels'])):
             raise DeliveryPending('remote_changed_after_sync')  # Never silently reclaim an externally changed closed ticket.
         expected_state = 'closed' if already_synced else 'open'
+        if issue.get('state') == 'closed' and not already_synced:
+            raise DeliveryPending(self._external_closure_reason(repository, number))  # Never reopen or claim an external/native closure as this feature's success.
         if issue.get('state') != expected_state or not isinstance(issue.get('labels'), list) or any(not isinstance(v, str) for v in issue['labels']):
             raise DeliveryPending('issue_not_open_or_fields_unavailable')
-        if any(op['kind'] == 'label' and op['status'] == 'confirmed' and op['expected_after']['name'] in issue['labels'] for op in operations):
+        if any(op['kind'] == 'label' and op['status'] == 'confirmed' and op['expected_after']['name'] in issue['labels'] for op in active_operations):
             raise DeliveryPending('confirmed_operation_reversed')  # A restored confirmed removal is external change, never another missing step.
         try:
             expected = self._body(binding, state, before, progress['delivery'])
@@ -395,12 +457,15 @@ class IssueSync:
             current_projection = store.acceptance_projection(binding['ticket_id'])
             if not self._qualification_matches(current_state, current_projection, binding):
                 raise DeliveryPending('qualification_changed_before_close' if kind == 'close' else 'qualification_changed_before_write')
+            before_events = self._stable_events(repository, number) if kind == 'close' else None
+            if kind == 'close':
+                read(expected, labels)  # Events and Issue fields are both rechecked before the close intent.
             op = {'kind': kind, 'status': 'intent', 'expected_before': previous, 'expected_after': following,
                   'candidate_id': binding['candidate_id'], 'delivery_sha': progress['delivery']['sha']}
             operations.append(op)
             self._publish_progress(journal, binding, progress)  # Persist exact intent and source before any external request.
             try:
-                request()
+                receipt = request()
             except DeliveryPending as exc:
                 definitive = {'connection_unauthorized', 'permission_denied', 'remote_material_missing', 'remote_material_gone',
                               'remote_request_rejected', 'rate_limited', 'remote_body_invalid', 'remote_label_invalid'}
@@ -413,6 +478,17 @@ class IssueSync:
             actual = read(expected, labels, next_state)
             if next_state == 'closed' and actual.get('state_reason') != 'completed':
                 raise DeliveryPending('close_reason_readback_mismatch')
+            if kind == 'close':
+                after_events = self._stable_events(repository, number)
+                appended = after_events[len(before_events):]
+                if (after_events[:len(before_events)] != before_events or len(appended) != 1 or appended[0]['event'] != 'closed'
+                        or not isinstance(receipt, dict) or type(receipt.get('id')) is not int or receipt['id'] != binding['issue']['id']
+                        or type(receipt.get('number')) is not int or receipt['number'] != number or receipt.get('state') != 'closed' or receipt.get('state_reason') != 'completed'):
+                    op['status'] = 'unknown'
+                    raise DeliveryPending('close_event_interval_unknown')  # An acknowledgement and an unambiguous observed interval are both necessary.
+                binding['intervention'] = {**binding.get('intervention', {}), 'status': 'watching', 'closure': {'event': appended[0], 'events': after_events,
+                    'acknowledgement': {'id': receipt['id'], 'number': receipt['number'], 'state': 'closed', 'state_reason': 'completed'},
+                    'association': 'acknowledged_request_stable_interval'}}  # Correlation is explicit; this is not exclusive remote attribution.
             op['status'] = 'confirmed'
             self._publish_progress(journal, binding, progress)  # Dependent writes wait for actual readback confirmation.
 
@@ -454,13 +530,49 @@ class IssueSync:
     def continue_sync(self, store, *, ticket_id=None):
         return self._run_sync(store, ticket_id=ticket_id, explicit_continue=True)  # Explicit catch-up shares all gates and never calls RunStore.resume.
 
+    def take_over(self, store, *, ticket_id, user_reference):
+        if not isinstance(ticket_id, str) or not ticket_id or not isinstance(user_reference, str) or not user_reference.strip():
+            raise ValueError('Explicit ticket identity and real user takeover reference required')
+        return self._run_sync(store, ticket_id=ticket_id, explicit_continue=True, takeover_reference=user_reference)  # Caller must supply the actual ticket-specific human instruction.
+
+    def _prepare_takeover(self, journal, binding, progress, state, user_reference):
+        intervention = binding.get('intervention', {})
+        if intervention.get('status') != 'manual_paused':
+            raise DeliveryPending('ticket_not_manually_paused')
+        repository = configuration(self.project)['configuration']['repository']
+        issue = self.github.get_issue(repository, binding['issue']['number'])
+        if self._identity(issue, binding['issue']['number'], repository, 'issue') != binding['issue']:
+            raise DeliveryPending('issue_identity_changed')
+        events = self._stable_events(repository, binding['issue']['number'])
+        original = intervention['closure']['events']
+        if events[:len(original)] != original or intervention['reopened_event'] not in events[len(original):]:
+            raise DeliveryPending('close_event_interval_unknown')
+        if issue.get('state') != 'open':
+            raise DeliveryPending('externally_closed_issue')  # A takeover never reopens an Issue already closed by another mechanism.
+        body = issue.get('body')
+        try:
+            mapping = {key: {k: value[k] for k in ('text', 'context')} for key, value in binding['mapping'].items()}
+            self._mapping(mapping, binding['scope'], body, self._acceptance_source(state, binding['scope'], body))
+            self._body(binding, state, body, progress['delivery'])  # Recheck the current complete source, exact map and managed summary.
+        except (ValueError, TypeError):
+            raise DeliveryPending('body_mapping_changed') from None
+        takeovers = intervention.setdefault('takeovers', [])
+        takeovers.append({'user_reference': user_reference, 'closure': copy.deepcopy(intervention['closure']),
+                          'reopened_event': copy.deepcopy(intervention['reopened_event']), 'events': events,
+                          'body_baseline_id': fingerprint(body)})
+        intervention.update(status='reclaimed', operation_start=len(progress['operations']))
+        intervention.pop('closure')
+        intervention.pop('reopened_event')
+        binding['body_baseline_id'] = fingerprint(body)
+        self._publish_progress(journal, binding, progress)  # Requalification preceded this new effect epoch; old operations remain intact.
+
     def sync_once(self, store, *, ticket_id=None):
         return self._run_sync(store, ticket_id=ticket_id)
 
-    def _run_sync(self, store, *, ticket_id=None, explicit_continue=False):
+    def _run_sync(self, store, *, ticket_id=None, explicit_continue=False, takeover_reference=None):
         self._state(store)  # Reject a foreign authority before converting local persistence errors into pending.
         try:
-            return self._execute_once(store, ticket_id=ticket_id, explicit_continue=explicit_continue)
+            return self._execute_once(store, ticket_id=ticket_id, explicit_continue=explicit_continue, takeover_reference=takeover_reference)
         except LocalJournalConflict:
             return self._local_pending(store, 'local_revision_conflict')
         except (ValueError, TypeError, KeyError):
@@ -470,14 +582,20 @@ class IssueSync:
         except OSError:
             return self._local_pending(store, 'local_persistence_unavailable')
 
-    def _execute_once(self, store, *, ticket_id=None, explicit_continue=False):
+    def _execute_once(self, store, *, ticket_id=None, explicit_continue=False, takeover_reference=None):
         state = self._state(store)
+        selected = [binding for binding in self._journal()['bindings'] if binding['run_id'] == store.run_id
+                    and (ticket_id is None or binding['ticket_id'] == ticket_id)]
+        if len(selected) == 1 and selected[0].get('intervention', {}).get('status') == 'manual_paused' and takeover_reference is None:
+            binding = selected[0]
+            return {**copy.deepcopy(binding['progress']), 'status': 'manual_paused', 'reason': 'external_reopen_observed',
+                    'ticket_id': binding['ticket_id'], 'binding_id': binding['binding_id']}  # Local human control remains visible even when disabled or disconnected.
         if not self._enrolled(state):
             return {'status': 'unmanaged', 'reason': 'not_enrolled_in_current_generation'}
         config = configuration(self.project)['configuration']
         try:
             with self.github.round(config['connection_reference']) if hasattr(self.github, 'round') else nullcontext():
-                return self._sync_once(store, ticket_id=ticket_id, explicit_continue=explicit_continue)  # One finite Adapter round covers qualification, writes and final requalification.
+                return self._sync_once(store, ticket_id=ticket_id, explicit_continue=explicit_continue, takeover_reference=takeover_reference)  # One finite Adapter round covers qualification, writes and final requalification.
         except DeliveryPending as exc:
             with self._locked():
                 journal = self._journal()
@@ -490,7 +608,7 @@ class IssueSync:
                     self._publish_progress(journal, selected[0], progress)
                 return progress
 
-    def _sync_once(self, store, *, ticket_id=None, explicit_continue=False):
+    def _sync_once(self, store, *, ticket_id=None, explicit_continue=False, takeover_reference=None):
         state = self._state(store)
         if not self._enrolled(state):
             return {'status': 'unmanaged', 'reason': 'not_enrolled_in_current_generation'}
@@ -502,6 +620,16 @@ class IssueSync:
             if len(bindings) != 1:
                 return {'status': 'pending', 'reason': 'explicit_ticket_selection_required'}
             binding = bindings[0]
+            prior_progress = copy.deepcopy(binding['progress'])
+            try:
+                if self._observe_intervention(journal, binding, prior_progress,
+                        configuration(self.project)['configuration']['repository'], binding['issue']['number']):
+                    if takeover_reference is None:
+                        return {**prior_progress, 'ticket_id': binding['ticket_id'], 'binding_id': binding['binding_id']}
+            except DeliveryPending as exc:
+                prior_progress.update(status='pending', reason=exc.reason)
+                self._publish_progress(journal, binding, prior_progress)
+                return {**prior_progress, 'ticket_id': binding['ticket_id'], 'binding_id': binding['binding_id']}
             delivery = None  # Facts from a previous round never bypass a fresh PR/CI read.
             projection = store.acceptance_projection(binding['ticket_id'])
             if state['status'] not in {'running', 'completed'}:
@@ -532,6 +660,20 @@ class IssueSync:
                 latest_projection = store.acceptance_projection(binding['ticket_id'])  # Remote waits cannot freeze professional currentness.
                 if not self._qualification_matches(latest_state, latest_projection, binding):
                     reason, delivery = 'qualification_changed_during_read', None
+            if (reason in {'required_ci_not_successful', 'required_ci_missing_or_ambiguous', 'final_pr_not_merged'}
+                    and callable(getattr(self.github, 'close_issue', None))
+                    and not any(op['kind'] == 'close' for op in binding['progress'].get('operations', []))):
+                try:
+                    repository = configuration(self.project)['configuration']['repository']
+                    issue = self.github.get_issue(repository, binding['issue']['number'])
+                    if self._identity(issue, binding['issue']['number'], repository, 'issue') != binding['issue']:
+                        raise DeliveryPending('issue_identity_changed')
+                    if issue.get('state') == 'closed':
+                        reason = self._external_closure_reason(repository, binding['issue']['number'])  # Early native closure must be visible before CI becomes eligible.
+                except DeliveryPending as exc:
+                    reason = exc.reason
+                    if exc.retry_not_before is not None:
+                        delivery = {'retry_not_before': exc.retry_not_before}  # Never read beyond a newly returned service-wait boundary.
             progress = {'status': 'pending', 'reason': reason,
                         'qualification_reason': projection.get('reason') if not projection['eligible'] else None,
                         'operations': copy.deepcopy(binding['progress'].get('operations', []))}  # New missing prerequisites never erase confirmed or failed remote history.
@@ -539,6 +681,8 @@ class IssueSync:
                 progress.update(delivery)  # Qualification and successful remote synchronization remain distinct states.
             if progress.get('delivery_eligible'):
                 try:
+                    if takeover_reference is not None:
+                        self._prepare_takeover(journal, binding, progress, state, takeover_reference)
                     progress = self._synchronize_issue(store, journal, binding, progress, state, explicit_continue=explicit_continue)
                 except DeliveryPending as exc:
                     progress['reason'] = exc.reason  # A partial mutation remains pending until every readback matches.
@@ -546,6 +690,8 @@ class IssueSync:
                         progress['retry_not_before'] = exc.retry_not_before
                 except (ValueError, TypeError, KeyError):
                     progress['reason'] = 'remote_material_invalid'
+            if binding.get('intervention', {}).get('status') == 'manual_paused':
+                progress['status'] = 'manual_paused'  # Failed takeover validation preserves the controlling pause.
             if binding['progress'] != progress:
                 binding['progress'] = progress
                 journal['revision'] += 1

@@ -126,6 +126,14 @@ def _qualify_delivery(github, repository, config, binding, state):
     identity = ('id', 'number', 'repository_id', 'repository_full_name', 'type')  # Freeze stable PR identity, not a moving branch.
     if any(pull.get(key) != binding['final_pr'][key] for key in identity):
         raise DeliveryPending('final_pr_identity_changed')
+    body = pull.get('body') or ''
+    reference = (r'(?:#' + str(binding['issue']['number']) + r'\b|'
+                 + re.escape(repository['full_name']) + r'#' + str(binding['issue']['number']) + r'\b|'
+                 + re.escape('https://github.com/' + repository['full_name'] + '/issues/' + str(binding['issue']['number'])) + r'\b)')
+    if not isinstance(body, str):
+        raise DeliveryPending('final_pr_body_unavailable')
+    if re.search(r'\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?[ \t\r\n]*' + reference, body, re.IGNORECASE):
+        raise DeliveryPending('native_early_close_conflict')  # Report conservative native-closing syntax; never rewrite the author's PR.
     if not all(key in pull for key in ('merged', 'merged_at', 'base_ref', 'head_sha', 'merge_commit_sha')):
         raise DeliveryPending('final_delivery_unverified')  # Existing boundary clients lacking delivery facts remain pending.
     if pull['merged'] is not True or not pull['merged_at']:
@@ -137,7 +145,7 @@ def _qualify_delivery(github, repository, config, binding, state):
     verify_contents(github, repository, binding, state, [pull['head_sha'], pull['merge_commit_sha']])
     ci = qualify_ci(github, repository, config, pull['merge_commit_sha'])
     final = github.get_pull_request(repository, binding['final_pr']['number'])
-    if any(final.get(key) != pull.get(key) for key in (*identity, 'merged', 'merged_at', 'base_ref', 'head_sha', 'merge_commit_sha')):
+    if any(final.get(key) != pull.get(key) for key in (*identity, 'merged', 'merged_at', 'base_ref', 'head_sha', 'merge_commit_sha', 'body')):
         raise DeliveryPending('final_pr_changed_during_read')  # A force-push or corrected merge fact invalidates this observation.
     return {'status': 'pending', 'reason': 'delivery_qualified', 'delivery_eligible': True,
             'delivery': {'sha': pull['merge_commit_sha'], 'pr_head_sha': pull['head_sha'], 'pr_number': pull['number'],
