@@ -325,6 +325,47 @@ class IssueSync:
             self._save(self.root / 'bindings.json', journal)
             return copy.deepcopy(binding)
 
+    def defer_acceptance(self, store, *, event_id):
+        state = self._state(store)
+        event = next((value for value in state['events'] if value['event_id'] == event_id and value['status'] == 'completed'), None)
+        if not self._enrolled(state) or state['status'] != 'paused' or event is None:
+            return  # A paused receipt records only its original authority reference, never qualification.
+        with self._locked():
+            journal, changed = self._journal(), False
+            for binding in journal['bindings']:
+                if binding['run_id'] == store.run_id and not any(value['event_id'] == event_id for value in binding.get('acceptance_receipts', [])):
+                    binding.setdefault('acceptance_receipts', []).append({'event_id': event_id, 'status': 'deferred'})  # Foreground reconstruction can later locate this actual saved receipt.
+                    changed = True
+            if changed:
+                journal['revision'] += 1
+                self._save(self.root / 'bindings.json', journal)
+
+    def refresh_acceptance(self, store, *, event_id):
+        state = self._state(store)
+        event = next((value for value in state['events'] if value['event_id'] == event_id and value['status'] == 'completed'), None)
+        completed_node = state['status'] == 'completed' and event_id is None  # Only the explicit completion node can adopt the already qualified batch.
+        if not self._enrolled(state) or (not completed_node and (state['status'] != 'running' or event is None)):
+            return  # Only a genuinely accepted foreground specialist result supplies this adoption node.
+        with self._locked():
+            journal = self._journal()
+            changed = False
+            for binding in journal['bindings']:
+                if binding['run_id'] != store.run_id:
+                    continue
+                projection = store.acceptance_projection(binding['ticket_id'])  # Reuse the original full-scope professional qualifier.
+                if projection['eligible']:
+                    if binding.get('candidate_id') != projection['candidate_id']:
+                        binding['candidate_id'] = projection['candidate_id']
+                        binding['source_references'] = projection['sources']  # Source adoption preserves identity, mapping, controls and remote operation history.
+                        changed = True
+                    for receipt in binding.get('acceptance_receipts', []):
+                        if receipt['event_id'] == event_id and receipt['status'] == 'deferred':
+                            receipt['status'] = 'applied'  # Preserve the deferred receipt history after actual current-scope requalification.
+                            changed = True
+            if changed:
+                journal['revision'] += 1
+                self._save(self.root / 'bindings.json', journal)
+
     def status(self, store=None):
         record = configuration(self.project)
         bindings = self._journal()['bindings']
@@ -587,6 +628,8 @@ class IssueSync:
             before_events = self._stable_events(repository, number) if kind == 'close' else None
             if kind == 'close':
                 read(expected, labels)  # Events and Issue fields are both rechecked before the close intent.
+                if not self._qualification_matches(self._state(store), store.acceptance_projection(binding['ticket_id']), binding):
+                    raise DeliveryPending('qualification_changed_before_close')  # A pause/cancel observed during those remote reads prevents issuing a new request.
             op = {'kind': kind, 'status': 'intent', 'expected_before': previous, 'expected_after': following,
                   'candidate_id': binding['candidate_id'], 'delivery_sha': progress['delivery']['sha']}
             operations.append(op)
@@ -619,6 +662,8 @@ class IssueSync:
                     'association': 'acknowledged_request_stable_interval'}}  # Correlation is explicit; this is not exclusive remote attribution.
             op['status'] = 'confirmed'
             self._publish_progress(journal, binding, progress)  # Dependent writes wait for actual readback confirmation.
+            if self._state(store)['status'] not in {'running', 'completed'}:
+                raise DeliveryPending('run_control_stopped')  # After an in-flight receipt, stopped control permits no new remote operation.
 
         labels = list(issue['labels'])
         read(before, labels)  # Re-read immediately before the first intent, rather than trust the binding snapshot.
@@ -740,6 +785,8 @@ class IssueSync:
                     'ticket_id': binding['ticket_id'], 'binding_id': binding['binding_id']}  # Local human control remains visible even when disabled or disconnected.
         if not self._enrolled(state):
             return {'status': 'unmanaged', 'reason': 'not_enrolled_in_current_generation'}
+        if not selected:
+            return {'status': 'pending', 'reason': 'issue_not_bound'}  # Unbound lifecycle nodes never initialize a credential-bearing Adapter round.
         if len(selected) == 1:
             waiting = self._service_wait(selected[0])
             if waiting is not None:

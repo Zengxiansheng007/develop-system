@@ -66,6 +66,8 @@ resolved_findings 为专业技能确认已处理的旧 frame_id 数组；结论�
 
 授权范围不自动包含部署、远程写入或消息。`/skill` 文本是技能意图，不是 shell 命令，不断言宿主原生菜单注册。会话压缩由宿主处理，不用 /clear 假装新上下文；不建立后台唤醒。
 
+工单同步的项目接入、自动前台节点、completed 明确补同步、暂停收件及自有 PR 交接统一遵循[操作契约](issue-sync-lifecycle.md)。原 RunStore 是专业事实和控制的唯一权威；同步日志只保存远端进度和来源。发布交接传递 `native_auto_close: false` 与合并后必需 CI 门槛，不生成原生提前关闭指令。未启用/未纳管、导航、仅打开应用和停止期间不发起同步写入。
+
 Windows 使用 PowerShell 原生命令，人工向导匹配实际 Bash/WSL/PowerShell 环境。打开文件不表示执行或验证完成。
 
 状态工具见[状态操作](state-operations.md)，扩展见[扩展接口](extensions.md)。需要评估或明确采用 v3 运行时，按[迁移协议](migration-preview.md)核对原身份、历史依据、授权与精确目标，再处理切换和有条件恢复；旧帧及 v1 证据按[显式兼容清单与专业核验](legacy-compatibility.md)处理，不凭新事件缺字段降级。state v1/v2 不自动续跑。

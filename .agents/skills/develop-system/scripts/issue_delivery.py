@@ -122,18 +122,22 @@ def qualify_delivery(github, repository, config, binding, state):
         raise DeliveryPending('remote_material_invalid') from None  # Malformed remote data never escapes as a success or raw diagnostic.
 
 
+def native_closing_reference(body, repository, issue_number):
+    reference = (r'(?:#' + str(issue_number) + r'\b|'
+                 + re.escape(repository['full_name']) + r'#' + str(issue_number) + r'\b|'
+                 + re.escape('https://github.com/' + repository['full_name'] + '/issues/' + str(issue_number)) + r'\b)')
+    return bool(re.search(r'\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?[ \t\r\n]*' + reference, body, re.IGNORECASE))  # One conservative detector protects both owned handoff and final delivery.
+
+
 def _qualify_delivery(github, repository, config, binding, state):
     pull = github.get_pull_request(repository, binding['final_pr']['number'])
     identity = ('id', 'number', 'repository_id', 'repository_full_name', 'type')  # Freeze stable PR identity, not a moving branch.
     if any(pull.get(key) != binding['final_pr'][key] for key in identity):
         raise DeliveryPending('final_pr_identity_changed')
     body = pull.get('body') or ''
-    reference = (r'(?:#' + str(binding['issue']['number']) + r'\b|'
-                 + re.escape(repository['full_name']) + r'#' + str(binding['issue']['number']) + r'\b|'
-                 + re.escape('https://github.com/' + repository['full_name'] + '/issues/' + str(binding['issue']['number'])) + r'\b)')
     if not isinstance(body, str):
         raise DeliveryPending('final_pr_body_unavailable')
-    if re.search(r'\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?[ \t\r\n]*' + reference, body, re.IGNORECASE):
+    if native_closing_reference(body, repository, binding['issue']['number']):
         raise DeliveryPending('native_early_close_conflict')  # Report conservative native-closing syntax; never rewrite the author's PR.
     if not all(key in pull for key in ('merged', 'merged_at', 'base_ref', 'head_sha', 'merge_commit_sha')):
         raise DeliveryPending('final_delivery_unverified')  # Existing boundary clients lacking delivery facts remain pending.

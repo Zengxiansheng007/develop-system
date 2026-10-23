@@ -570,7 +570,7 @@ class RunStore:
                 continue
         return decide_entry(context, candidates)
 
-    def __init__(self, project_root, run_id, entry="develop-system"):
+    def __init__(self, project_root, run_id, entry="develop-system", *, github=None, token_provider=None):
         if entry_mode(entry) != "execute":
             raise ValueError("Navigation cannot create or mutate workflow state")
         self.project = Path(project_root).resolve(strict=True)
@@ -581,6 +581,33 @@ class RunStore:
             raise ValueError("Run path escapes project")
         self.path = self.root / "state.json"
         self.run_id = run_id
+        self.issue_github, self.issue_token_provider = github, token_provider  # Inject only the external system and approved named credential resolver.
+
+    def _issue_event(self, event, *, event_id=None):
+        from issue_lifecycle import synchronize_event  # Load the owned composition only at an actual foreground lifecycle node.
+        from issue_sync import LocalJournalConflict  # The accepted-source bookkeeping shares the same local concurrency boundary as sync.
+        try:
+            self.last_issue_sync = synchronize_event(self, event, github=self.issue_github,
+                token_provider=self.issue_token_provider, event_id=event_id)  # Synchronization progress stays outside execution state.
+        except LocalJournalConflict:
+            self.last_issue_sync = {'status': 'pending', 'reason': 'local_revision_conflict'}  # A competing journal publication cannot fail the saved professional return.
+        except (OSError, ValueError, KeyError, TypeError):
+            self.last_issue_sync = {'status': 'pending', 'reason': 'local_sync_unavailable'}  # A local sync error cannot undo an accepted professional return.
+        return self.last_issue_sync
+
+    def delivery_updated(self):
+        """Recheck externally changed PR/CI facts for this explicitly identified foreground run."""
+        return self._issue_event('delivery_updated')  # No candidate adoption, authority mutation or background work occurs here.
+
+    def continue_project(self, *, user_reference):
+        """Explicit foreground catch-up, including terminal runs, without resuming development."""
+        if not isinstance(user_reference, str) or not user_reference.strip():
+            raise ValueError('Explicit project-task continuation reference required')
+        return self._issue_event('continued')  # User control and professional currentness remain independently enforced.
+
+    def pr_handoff(self, body):
+        from issue_lifecycle import pr_handoff  # Keep PR publication instructions in the owned dispatcher layer.
+        return pr_handoff(self, body)
 
     @contextmanager
     def locked(self):
@@ -679,6 +706,7 @@ class RunStore:
             if self.path.exists():
                 raise FileExistsError("Existing run must be resumed, not replaced")
             self.write_atomic(state)
+        self._issue_event('created')  # New identity enrollment is fixed before the common sync entry can observe it.
         return state
 
     def block_unavailable(self, revision, skill_id, reason, step_id=None, parent_frame_id=None, category="missing_file"):
@@ -886,7 +914,10 @@ class RunStore:
         return state
 
     def receive(self, revision, result):
-        return self.mutate(revision, lambda state: self._receive_state(state, result))
+        state = self.mutate(revision, lambda state: self._receive_state(state, result))
+        if state['revision'] != revision and result.get('status') == 'completed':
+            self._issue_event('acceptance_available', event_id=result['event_id'])  # A fresh accepted return is distinct from a duplicate or paused receipt.
+        return state
 
     def qualify_legacy(self, revision, frame_id, source_frame_id):
         def change(state):
@@ -1271,7 +1302,10 @@ class RunStore:
             reconcile_system_conclusions(state)
             explain_system_restrictions(state)
             return state
-        return self.mutate(revision, change)
+        state = self.mutate(revision, change)
+        if isinstance(user_reference, str) and user_reference.strip():
+            self._issue_event('continued')  # Only an explicit user continuation adds sync to the original resume behavior.
+        return state
 
     def acceptance_projection(self, ticket_id):
         """Read original ticket scope and current specialist conclusions without mutating authority."""
@@ -1321,12 +1355,14 @@ class RunStore:
             state["control"]["status"] = "completed"
             state["next_decision"] = {"action": "complete", "return_to": "develop-system"}
             return state
-        return self.mutate(revision, change)
+        state = self.mutate(revision, change)
+        self._issue_event('completed')  # Whole-run completion reuses the already qualified ticket/batch sources.
+        return state
 
 
-def main():
+def main(argv=None, *, github=None, token_provider=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["init", "show", "next", "preview-migration", "apply-migration", "rollback-migration", "qualify-legacy", "inspect-grill", "attach-grill", "route-grill", "dispatch", "block", "return", "register", "extend-plan", "assess", "resume", "complete", "pause", "cancel"])
+    parser.add_argument("command", choices=["init", "show", "next", "delivery-updated", "continue-project", "preview-migration", "apply-migration", "rollback-migration", "qualify-legacy", "inspect-grill", "attach-grill", "route-grill", "dispatch", "block", "return", "register", "extend-plan", "assess", "resume", "complete", "pause", "cancel"])
     parser.add_argument("--entry", required=True, choices=["develop-system", "ask-matt"])
     parser.add_argument("--project-root", required=True)
     parser.add_argument("--run-id", required=True)
@@ -1334,6 +1370,7 @@ def main():
     parser.add_argument("--goal")
     parser.add_argument("--plan")
     parser.add_argument("--acceptance")
+    parser.add_argument("--ticket-scopes", help="Original full ticket-scope declarations, fixed only when creating this new run")  # CLI creation must share the existing public immutable-scope contract.
     parser.add_argument("--registry", default=str(SKILL_ROOT / "registry.json"))
     parser.add_argument("--adoption", help="Explicit single-run authorization and original-version evidence JSON")
     parser.add_argument("--skill-id")
@@ -1355,17 +1392,22 @@ def main():
     parser.add_argument("--resolution")
     parser.add_argument("--payload")
     parser.add_argument('--event-id')
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     def read(path):
         return json.loads(Path(path).read_text(encoding="utf-8"))
     try:
-        store = RunStore(args.project_root, args.run_id, args.entry)
+        store = RunStore(args.project_root, args.run_id, args.entry, github=github, token_provider=token_provider)  # Hosts inject their explicit named resolver without credential CLI arguments.
         if args.command == 'inspect-grill':
             context = read(args.payload)
             context['project_root'] = str(store.project)
             value = store.inspect_grill_entry(context)
         elif args.command == "init":
-            value = store.create(args.goal, read(args.plan), read(args.acceptance), args.registry)
+            value = store.create(args.goal, read(args.plan), read(args.acceptance), args.registry,
+                ticket_scopes=read(args.ticket_scopes) if args.ticket_scopes else None)
+        elif args.command == 'delivery-updated':
+            value = store.delivery_updated()  # Sync progress does not consume an execution revision.
+        elif args.command == 'continue-project':
+            value = store.continue_project(user_reference=args.user_reference)  # Completed-run catch-up never enters resume.
         elif args.command == "preview-migration":
             value = store.preview_migration(args.registry, read(args.adoption) if args.adoption else None)
         elif args.command in {"show", "next"}:

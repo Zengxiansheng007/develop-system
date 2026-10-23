@@ -46,6 +46,19 @@ return --payload <结果文件> 的结构见 [统一执行协议](codex-runtime.
 
 局部限制、就绪与完成的含义见[作用范围](scoped-state.md)。
 
+## 工单同步前台入口
+
+项目接入、新运行完整范围、自动节点、暂停收件和 PR 发布交接按[工单同步操作契约](issue-sync-lifecycle.md)执行；随包的[首接模板](issue-sync-project.disabled.json)保持禁用。宿主可向 `RunStore` 或 `main(argv, github=..., token_provider=...)` 注入批准的外部 Adapter/命名 resolver；CLI 不接受凭据值，也不自行搜索凭据。
+
+`init --ticket-scopes <JSON>` 将原票全部 AC/必要闭包与新身份同时固定。`delivery-updated` 重核当前交付；completed 运行的明确补同步使用 `continue-project --user-reference <真实用户继续来源>`，两者不需要 `--revision` 且不写原执行状态：
+
+```powershell
+python -B $workflowTool delivery-updated --entry develop-system --project-root 'C:\project' --run-id checkout
+python -B $workflowTool continue-project --entry develop-system --project-root 'C:\project' --run-id checkout --user-reference '<真实用户明确继续本项目任务的来源>'
+```
+
+这里的运行必须明确指定，来源占位符须替换为真实依据。paused/cancelled 控制与工单人工暂停继续生效；completed 不走 resume。缺少宿主连接时保留解释性同步待办，命令退出成功不代表远端已同步。
+
 ## 扩展与测试
 
 register --payload <描述文件> 保存临时能力；根步骤再 extend-plan。描述使用 [扩展接口](extensions.md)，所有技能真实执行并回流，缺失阻塞。永久能力在共享注册表维护并校验同步。
