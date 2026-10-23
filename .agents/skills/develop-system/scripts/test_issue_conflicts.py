@@ -58,7 +58,7 @@ class IssueConflictTests(unittest.TestCase):
     def test_detected_prewrite_and_postwrite_changes_preserve_difference_and_stop_dependants(self):
         for read_number, stage, written in ((2, 'before_write', []), (3, 'after_write', ['body']),
                                             (4, 'before_write', ['body']), (6, 'before_write', ['body', 'label']),
-                                            (7, 'after_write', ['body', 'label', 'close'])):
+                                            (7, 'before_write', ['body', 'label']), (8, 'after_write', ['body', 'label', 'close'])):
             with self.subTest(read_number=read_number):
                 self.setUp()  # Every observation window owns an independent temporary project.
                 store = self.ready()
