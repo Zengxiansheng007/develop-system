@@ -185,21 +185,32 @@ class IssueSync:
             raise ValueError('GitHub object type or stable repository identity does not match')
         return {k: value[k] for k in ('id', 'number', 'repository_id', 'repository_full_name', 'type')}
 
-    def _acceptance_source(self, state, scope, body):
+    def _acceptance_source(self, state, scope, body, *, parent_spec=False):
         if not isinstance(body, str):
             raise ValueError('Original complete Issue acceptance source is unavailable')
         headings = list(re.finditer(r'(?mi)^##[ \t]+Acceptance criteria[ \t]*\r?$', body))
+        source_format = 'implementation-checklist-v1'
+        if not headings and parent_spec:
+            headings = list(re.finditer(r'(?m)^### 原需求验收条件[ \t]*\r?$', body))  # Spec14 retains its approved plain AC list; parent binding does not rewrite it.
+            source_format = 'parent-spec-ac-list-v1'
         if len(headings) != 1:
             raise ValueError('Original complete Issue acceptance source is unavailable')
         start = headings[0].end()
-        following = re.search(r'(?m)^#{1,2}[ \t]+', body[start:])
+        following = re.search(r'(?m)^#{1,3}[ \t]+' if source_format == 'parent-spec-ac-list-v1' else r'(?m)^#{1,2}[ \t]+', body[start:])
         section = body[start:start + following.start()] if following else body[start:]
         actual = [m.group(1).strip() for m in re.finditer(r'(?m)^[ \t]*[-*] \[[ xX]\] ([^\r\n]+)\r?$', section)]
+        if source_format == 'parent-spec-ac-list-v1':
+            entries = list(re.finditer(r'(?m)^- \*\*(AC-[0-9]{3}) / REQ-[0-9]{3}\*\*：([^\r\n]+)\r?$', section))  # Exact approved text replaces no professional conclusions.
+            if len(entries) != len(re.findall(r'(?m)^[ \t]*[-*][ \t]+', section)):
+                raise ValueError('Original complete Issue acceptance source contains unsupported entries')  # Never ignore an unrecognized original criterion to approve a narrowed scope.
+            if len({m.group(1) for m in entries}) != len(entries):
+                raise ValueError('Original complete Issue acceptance source is ambiguous')
+            actual = [m.group(2).strip() for m in entries]
         declared = [{'id': c['id'], 'text': c['criterion'].strip()} for c in state['acceptance'] if c['id'] in scope['acceptance_ids']]
         expected = [c['text'] for c in declared]
         if not actual or len(set(actual)) != len(actual) or len(expected) != len(actual) or set(expected) != set(actual):
             raise ValueError('Original complete Issue acceptance set does not match its source')
-        return {'format': 'implementation-checklist-v1', 'items': declared, 'source_id': fingerprint(declared)}  # Source completeness is independent of writeback mapping.
+        return {'format': source_format, 'items': declared, 'source_id': fingerprint(declared)}  # Source completeness is independent of writeback mapping.
 
     def _mapping(self, value, scope, body, source):
         if not isinstance(value, dict) or not set(value) <= set(scope['acceptance_ids']):
@@ -221,12 +232,14 @@ class IssueSync:
             normalized[criterion_id] = {**item, 'line_fingerprint': fingerprint(matches[0].group())}
         return normalized  # Persist stable text/context, never a stale line-number-only selector.
 
-    def bind(self, store, *, issue_number, final_pr, acceptance_map):
+    def bind(self, store, *, issue_number, final_pr, acceptance_map, parent_spec=False):
         state = self._state(store)
         if not self._enrolled(state):
             raise ValueError('Run was not created in the current explicitly enabled generation')
         if type(issue_number) is not int or issue_number <= 0:
             raise ValueError('One explicit Issue number required')
+        if type(parent_spec) is not bool:
+            raise ValueError('Explicit parent specification marker must be boolean')  # References or child counts never infer the parent's role.
         config = configuration(self.project)['configuration']
         repository = config['repository']
         if (not isinstance(final_pr, dict) or set(final_pr) != {'number', 'repository_id'}
@@ -242,19 +255,21 @@ class IssueSync:
         scope = next((s for s in state.get('ticket_scopes', []) if s['ticket_id'] == ticket_id), None)
         if scope is None:
             raise ValueError('Original complete ticket scope is unavailable')
-        source = self._acceptance_source(state, scope, issue.get('body') or '')
+        source = self._acceptance_source(state, scope, issue.get('body') or '', parent_spec=parent_spec)
         mapping = self._mapping(acceptance_map, scope, issue.get('body') or '', source)
         projection = store.acceptance_projection(ticket_id)
         fixed = {'run_id': store.run_id, 'enrollment': state['issue_sync_enrollment'], 'scope': scope,
                  'issue': issue_identity, 'final_pr': pull_identity, 'mapping': mapping, 'acceptance_source': source,
                  'body_baseline_id': fingerprint(issue.get('body') or ''), 'body_baseline': issue.get('body') or ''}  # Preserve an exact local conflict baseline, never export it.
+        if parent_spec:
+            fixed['parent_spec'] = True  # Persist the explicit parent binding separately from its original complete scope.
         with self._locked():
             latest = self._state(store)
             if not self._enrolled(latest) or latest['revision'] != state['revision']:
                 raise ValueError('Run or configuration changed while binding')
             journal = self._journal()
             existing = next((b for b in journal['bindings'] if b['ticket_id'] == ticket_id), None)
-            if existing and any(existing[k] != v for k, v in fixed.items()):
+            if existing and (existing.get('parent_spec', False) != parent_spec or any(existing.get(k) != v for k, v in fixed.items())):
                 raise ValueError('Issue already has a conflicting run, PR, scope or body binding')
             candidate_id = projection.get('candidate_id') if projection['eligible'] else None
             if existing and existing.get('candidate_id') == candidate_id:
@@ -282,7 +297,7 @@ class IssueSync:
 
     def _body(self, binding, state, body, delivery):
         mapping = {key: {k: item[k] for k in ('text', 'context')} for key, item in binding['mapping'].items()}
-        self._mapping(mapping, binding['scope'], body, self._acceptance_source(state, binding['scope'], body))  # Revalidate unique text/context against current complete ACs.
+        self._mapping(mapping, binding['scope'], body, self._acceptance_source(state, binding['scope'], body, parent_spec=binding.get('parent_spec', False)))  # Revalidate unique text/context against current complete ACs.
         for item in mapping.values():
             body = re.sub(r'(?m)^([ \t]*[-*] \[)[ xX](\] ' + re.escape(item['text']) + r'\r?)$', r'\g<1>x\2', body)
         repository = binding['issue']['repository_full_name']
@@ -341,7 +356,7 @@ class IssueSync:
             self._record_body_conflict(journal, binding, progress, value['expected_body'], issue,
                                        'resolution_read', 'body_resolution_stale')
         try:
-            source = self._acceptance_source(state, binding['scope'], issue['body'])
+            source = self._acceptance_source(state, binding['scope'], issue['body'], parent_spec=binding.get('parent_spec', False))
             mapping = self._mapping(value['acceptance_map'], binding['scope'], issue['body'], source)
         except ValueError:
             raise DeliveryPending('body_resolution_mapping_invalid') from None  # No old offset, duplicate selection or approximate text adoption.
@@ -626,7 +641,7 @@ class IssueSync:
         body = issue.get('body')
         try:
             mapping = {key: {k: value[k] for k in ('text', 'context')} for key, value in binding['mapping'].items()}
-            self._mapping(mapping, binding['scope'], body, self._acceptance_source(state, binding['scope'], body))
+            self._mapping(mapping, binding['scope'], body, self._acceptance_source(state, binding['scope'], body, parent_spec=binding.get('parent_spec', False)))
             self._body(binding, state, body, progress['delivery'])  # Recheck the current complete source, exact map and managed summary.
         except (ValueError, TypeError):
             raise DeliveryPending('body_mapping_changed') from None
@@ -671,6 +686,15 @@ class IssueSync:
         state = self._state(store)
         selected = [binding for binding in self._journal()['bindings'] if binding['run_id'] == store.run_id
                     and (ticket_id is None or binding['ticket_id'] == ticket_id)]
+        if ticket_id is None and len(selected) > 1:
+            if body_resolution is not None or takeover_reference is not None:
+                return {'status': 'pending', 'reason': 'explicit_ticket_selection_required'}  # Human review/takeover never broadcasts across bindings.
+            tickets = []
+            for binding in selected:
+                result = (self.continue_sync(store, ticket_id=binding['ticket_id']) if explicit_continue
+                          else self.sync_once(store, ticket_id=binding['ticket_id']))  # Serial public calls reread current authority/journal and isolate ticket-local stops.
+                tickets.append({**result, 'ticket_id': binding['ticket_id']})  # Pending never implies the other tickets failed or the whole batch passed.
+            return {'status': 'batch', 'tickets': tickets}
         if len(selected) == 1 and selected[0].get('intervention', {}).get('status') == 'manual_paused' and takeover_reference is None:
             binding = selected[0]
             return {**copy.deepcopy(binding['progress']), 'status': 'manual_paused', 'reason': 'external_reopen_observed',
