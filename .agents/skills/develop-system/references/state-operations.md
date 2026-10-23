@@ -31,6 +31,8 @@ return --payload <结果文件> 的结构见 [统一执行协议](codex-runtime.
 
 `assess --frame-id <待处理帧> --source-frame-id <专业结论帧> --resolution <专业结论摘要> --evidence <该结论的真实文件>` 只登记来源。来源帧须已完成、无未决发现，且其事件明确列出目标 frame_id；证据必须属于该事件。总路由不能凭自己撰写的文件关闭发现。
 
+项目已纳管时，成功 assess 保存专业来源后进入[工单同步的发现评估分支](issue-sync-lifecycle.md#生命周期与完成条件)，按原票完整资格核对同步；原评估返回形状保持。
+
 业务验收在专业结果 acceptance_checks 返回；每项有 id、status: "passed"、completion_checked、kind、真实 evidence。人工项 kind: human 还须 human_confirmed 与实际 user_reference。接受事件时保存来源，不能在关闭时重新添加或篡改结论。
 
 `complete --payload <引用数组>` 输入只需 `[{"id":"1","source_frame_id":"已回流专业帧"}]`。工具核对每项引用是否对应该事件的 passed 结论、帧及依赖已完成、证据和来源输入当前有效。缺失、失败、过期、人工未确认或调度器生成的验收断言拒绝。文件/hash 不代替专业判断。

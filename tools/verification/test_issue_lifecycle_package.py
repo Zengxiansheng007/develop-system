@@ -39,6 +39,7 @@ loaded = {name: str(Path(module.__file__).resolve()) for name, module in [('work
 if any(not Path(path).is_relative_to(scripts) for path in loaded.values()):
     raise ValueError('A generated package imported a different source candidate')
 names = ['test_accepted_return_refreshes_initial_binding_and_synchronizes_automatically',
+ 'test_final_professional_assessment_synchronizes_its_ticket_before_unrelated_work',
  'test_whole_run_completion_uses_the_same_sync_entry_for_its_existing_binding',
  'test_completed_explicit_continue_only_synchronizes_and_keeps_authority_bytes',
  'test_result_received_while_paused_is_saved_then_applied_only_after_explicit_resume',
@@ -55,7 +56,7 @@ raise SystemExit(0 if result.wasSuccessful() else 1)
             self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
             observation = json.loads(completed.stdout.strip().splitlines()[-1])
             self.assertTrue(observation['successful'])
-            self.assertEqual(observation['tests'], 6)
+            self.assertEqual(observation['tests'], 7)
             self.assertEqual(set(observation['loaded_shipped_sources']), {'workflow_state', 'issue_sync', 'issue_lifecycle'})
 
 

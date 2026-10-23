@@ -1198,7 +1198,10 @@ class RunStore:
             frame["needs_assessment"] = False
             state["next_decision"] = {"action": "reassess_parent_or_next"}
             return state
-        return self.mutate(revision, change)
+        state = self.mutate(revision, change)
+        source_event = next(event for event in reversed(state['events']) if event['frame_id'] == source_frame_id)  # The successful assessment already validated this genuine completed specialist source.
+        self._issue_event('acceptance_available', event_id=source_event['event_id'])  # Full original ticket qualification becomes available only after findings registration is saved.
+        return state
 
     def control(self, revision, status, reason):
         if status not in {"paused", "cancelled"} or not reason or not reason.strip():

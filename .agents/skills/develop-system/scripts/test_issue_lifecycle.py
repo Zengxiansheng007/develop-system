@@ -42,6 +42,171 @@ class IssueLifecycleTests(unittest.TestCase):
         self.assertEqual(self.github.issue['labels'], ['keep'])
         self.assertEqual(store.read(), state)  # Synchronization cannot insert another execution authority into RunStore.
 
+    def pending_assessment(self, *, extra_required=False, declare_resolution=True, paused_receipt=False, enabled=True, bind=True):
+        self.prepare()
+        if not enabled:
+            self.sync.configure({**self.config, 'enabled': False}, user_reference='synthetic disabled assessment project')  # This disposable run has no creation-time enrollment.
+        self.plan.extend([{'step_id': 'ticket-review', 'skill_id': 'research'},
+            {'step_id': 'unrelated-next', 'skill_id': 'to-spec'}])  # Ticket qualification cannot require this independent later work.
+        scope = self.scope()
+        scope['required_steps'].append('ticket-review')
+        if extra_required:
+            self.plan.append({'step_id': 'ticket-final', 'skill_id': 'research'})
+            scope['required_steps'].append('ticket-final')  # The original ticket still owns this genuinely required unfinished work.
+        store = RunStore(self.project, 'assessment-node', github=self.github)
+        state = store.create('synthetic assessment lifecycle', self.plan, ['verified behavior'], self.registry, ticket_scopes=[scope])
+        if bind:
+            self.sync.bind(store, issue_number=15, final_pr={'number': 13, 'repository_id': 77},
+                acceptance_map={'1': {'text': 'verified behavior', 'context': ''}})
+        original = None
+        for step in ('ticket-work', 'ticket-review'):
+            state = store.dispatch(state['revision'], 'research', 'ticket-v1', step)
+            frame = state['frames'][-1]
+            evidence = self.project / (step + '-assessment-evidence.txt')
+            evidence.write_text('Explicit synthetic professional conclusion for ' + step, encoding='utf-8')
+            event = {'protocol_version': 1, 'event_id': frame['frame_id'] + '-result', 'run_id': store.run_id,
+                'frame_id': frame['frame_id'], 'parent_frame_id': None, 'skill_id': 'research', 'input_version': 'ticket-v1',
+                'mode': 'skill', 'execution': 'sequential', 'status': 'completed', 'return_to': 'develop-system',
+                'completion_checked': True, 'artifacts': [str(evidence)], 'checks': [],
+                'findings': ['Synthetic finding requiring independent resolution'] if original is None else [],
+                'blockers': [], 'resolved_findings': [original] if original is not None and declare_resolution else [],
+                'acceptance_checks': [{'id': '1', 'status': 'passed', 'completion_checked': True,
+                    'kind': 'technical', 'evidence': [str(evidence)]}]}  # Synthetic claims enter only the genuine public receive API.
+            if original is not None and paused_receipt:
+                state = store.control(state['revision'], 'paused', 'synthetic user pause while resolution is in flight')
+            state = store.receive(state['revision'], event)
+            if original is None:
+                original = frame['frame_id']
+        return store, state, original, frame['frame_id'], evidence
+
+    def test_final_professional_assessment_synchronizes_its_ticket_before_unrelated_work(self):
+        store, state, original, resolver, evidence = self.pending_assessment()  # Reproduce the independent IS22-SPEC-001 scenario.
+        self.assertFalse(store.acceptance_projection('77:501')['eligible'])
+        self.assertIsNone(self.sync.status(store)['bindings'][0]['candidate_id'])
+        self.assertEqual(self.github.writes, [])
+        state = store.assess(state['revision'], original, 'Register actual synthetic specialist resolution',
+            [str(evidence)], source_frame_id=resolver)
+        self.assertTrue(store.acceptance_projection('77:501')['eligible'])
+        self.assertEqual(self.github.issue['state'], 'closed')  # Actual professional assessment must trigger foreground synchronization itself.
+        self.assertEqual(self.sync.status(store)['bindings'][0]['progress']['status'], 'synced')
+        self.assertEqual([kind for kind, _ in self.github.writes], ['body', 'label', 'close'])
+        self.assertEqual(state['status'], 'running')
+        self.assertEqual(next(step for step in state['plan'] if step['step_id'] == 'unrelated-next')['status'], 'pending')
+        self.assertEqual(store.read(), state)  # The hook adds no synthetic authority or accounting reset.
+        before = store.path.read_bytes()
+        writes = list(self.github.writes)
+        self.assertEqual(store.continue_project(user_reference='synthetic explicit continuation after actual assessment')['status'], 'synced')
+        self.assertEqual(store.path.read_bytes(), before)
+        self.assertEqual(self.github.writes, writes)
+
+    def test_nonfinal_assessment_preserves_original_required_work_and_cannot_adopt_a_candidate(self):
+        store, state, original, resolver, evidence = self.pending_assessment(extra_required=True)
+        state = store.assess(state['revision'], original, 'Register a valid partial specialist resolution', [str(evidence)], source_frame_id=resolver)
+        self.assertFalse(store.acceptance_projection('77:501')['eligible'])
+        self.assertIsNone(self.sync.status(store)['bindings'][0]['candidate_id'])
+        self.assertEqual(self.github.writes, [])
+        before = store.path.read_bytes()
+        self.assertEqual(store.continue_project(user_reference='synthetic continuation with unfinished required work')['reason'], 'acceptance_pending')
+        self.assertEqual(store.path.read_bytes(), before)
+
+    def test_assessment_requires_a_current_specialist_resolution_and_its_actual_evidence(self):
+        for invalid in ('missing-source', 'undeclared-resolution', 'changed-evidence', 'stale-source'):
+            with self.subTest(invalid=invalid):
+                self.setUp()
+                store, state, original, resolver, evidence = self.pending_assessment(declare_resolution=invalid != 'undeclared-resolution')
+                if invalid == 'changed-evidence':
+                    evidence.write_text('Altered after the accepted specialist return', encoding='utf-8')
+                if invalid == 'stale-source':
+                    (self.project / 'research.md').write_text('Changed specialist source after the return', encoding='utf-8')
+                before = store.path.read_bytes()
+                with self.assertRaises(ValueError):
+                    store.assess(state['revision'], original, 'A caller assertion alone is insufficient', [str(evidence)],
+                        source_frame_id=None if invalid == 'missing-source' else resolver)
+                self.assertEqual(store.path.read_bytes(), before)
+                self.assertEqual(self.github.writes, [])
+                self.assertIsNone(self.sync.status(store)['bindings'][0]['candidate_id'])
+
+    def test_assessment_does_not_qualify_a_candidate_changed_after_the_professional_return(self):
+        store, state, original, resolver, evidence = self.pending_assessment()
+        (self.project / 'candidate.py').write_text('value = 2  # Unreviewed after the specialist return.\n', encoding='utf-8')
+        before = store.path.read_bytes()
+        with self.assertRaisesRegex(ValueError, 'Resolution source is stale'):
+            store.assess(state['revision'], original, 'Register the unchanged specialist conclusion only', [str(evidence)], source_frame_id=resolver)
+        self.assertEqual(store.path.read_bytes(), before)  # Existing source currentness rejects the assessment before the new notification can run.
+        self.assertFalse(store.acceptance_projection('77:501')['eligible'])
+        self.assertIsNone(self.sync.status(store)['bindings'][0]['candidate_id'])
+        self.assertEqual(self.github.writes, [])
+        self.assertEqual(store.continue_project(user_reference='synthetic continuation cannot review changed source')['reason'], 'acceptance_pending')
+
+    def test_paused_resolution_waits_for_explicit_resume_and_actual_final_assessment(self):
+        store, state, original, resolver, evidence = self.pending_assessment(paused_receipt=True)
+        before = store.path.read_bytes()
+        with self.assertRaises(ValueError):
+            store.assess(state['revision'], original, 'Cannot assess during a user pause', [str(evidence)], source_frame_id=resolver)
+        self.assertEqual(store.path.read_bytes(), before)
+        self.assertEqual(store.continue_project(user_reference='synthetic sync-only request during pause')['reason'], 'run_control_stopped')
+        store = RunStore(self.project, store.run_id, github=self.github)  # Deferred receipt survives foreground reconstruction.
+        state = store.resume(state['revision'], user_reference='synthetic explicit resume after paused resolution')
+        self.assertFalse(store.acceptance_projection('77:501')['eligible'])
+        self.assertIsNone(self.sync.status(store)['bindings'][0]['candidate_id'])
+        self.assertEqual(self.github.writes, [])  # Explicit resume still cannot replace the missing genuine assessment.
+        state = store.assess(state['revision'], original, 'Register actual resumed specialist resolution', [str(evidence)], source_frame_id=resolver)
+        self.assertEqual(self.github.issue['state'], 'closed')
+        self.assertEqual(self.sync.status(store)['bindings'][0]['acceptance_receipts'][0]['status'], 'applied')
+        self.assertEqual(store.read(), state)
+
+    def test_cancelled_run_cannot_register_assessment_or_resume_synchronization(self):
+        store, state, original, resolver, evidence = self.pending_assessment()
+        state = store.control(state['revision'], 'cancelled', 'synthetic explicit cancellation before assessment')
+        before = store.path.read_bytes()
+        with self.assertRaises(ValueError):
+            store.assess(state['revision'], original, 'Cannot revive a cancelled goal', [str(evidence)], source_frame_id=resolver)
+        self.assertEqual(store.continue_project(user_reference='synthetic sync-only request')['reason'], 'run_control_stopped')
+        self.assertEqual(store.path.read_bytes(), before)
+        self.assertEqual(self.github.writes, [])
+
+    def test_assessment_retains_default_off_unbound_and_creation_generation_boundaries(self):
+        for enrollment in ('default-off', 'historical', 'unbound', 'old-generation'):
+            with self.subTest(enrollment=enrollment):
+                self.setUp()
+                store, state, original, resolver, evidence = self.pending_assessment(
+                    enabled=enrollment not in {'default-off', 'historical'}, bind=enrollment == 'old-generation')
+                if enrollment in {'historical', 'old-generation'}:
+                    self.sync.configure({**self.config, 'enabled': False}, user_reference='synthetic explicit disablement')
+                    self.sync.configure(self.config, user_reference='synthetic explicit new enablement generation')
+                state = store.assess(state['revision'], original, 'Register real local specialist resolution', [str(evidence)], source_frame_id=resolver)
+                self.assertTrue(store.acceptance_projection('77:501')['eligible'])
+                self.assertEqual(store.last_issue_sync['reason'], 'issue_not_bound' if enrollment == 'unbound' else 'not_enrolled_in_current_generation')
+                self.assertEqual(self.github.writes, [])
+                self.assertEqual(store.read(), state)
+
+    def test_actual_cli_assessment_runs_the_same_qualified_foreground_hook(self):
+        store, state, original, resolver, evidence = self.pending_assessment()
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = workflow_main(['assess', '--entry', 'develop-system', '--project-root', str(self.project), '--run-id', store.run_id,
+                '--revision', str(state['revision']), '--frame-id', original, '--source-frame-id', resolver,
+                '--resolution', 'Register actual synthetic CLI specialist resolution', '--evidence', str(evidence)], github=self.github)
+        self.assertEqual(code, 0, output.getvalue())
+        self.assertEqual(json.loads(output.getvalue()), store.read())
+        self.assertEqual(self.github.issue['state'], 'closed')
+        self.assertEqual(self.sync.status(store)['bindings'][0]['progress']['status'], 'synced')
+
+    def test_control_during_assessment_sync_only_saves_the_already_inflight_receipt(self):
+        for control in ('paused', 'cancelled'):
+            with self.subTest(control=control):
+                self.setUp()
+                store, state, original, resolver, evidence = self.pending_assessment()
+                def after_write(kind):
+                    if kind == 'body':
+                        store.control(store.read()['revision'], control, 'synthetic user control during the assessment-triggered request')
+                self.github.after_write = after_write  # Only the real external response boundary changes user control.
+                store.assess(state['revision'], original, 'Register actual specialist resolution before the issued request', [str(evidence)], source_frame_id=resolver)
+                self.assertEqual([kind for kind, _ in self.github.writes], ['body'])
+                self.assertEqual(self.sync.status(store)['bindings'][0]['progress']['operations'][-1]['status'], 'confirmed')
+                self.assertEqual(store.read()['status'], control)
+                self.assertEqual(self.github.issue['state'], 'open')
+
     def test_whole_run_completion_uses_the_same_sync_entry_for_its_existing_binding(self):
         self.prepare()
         store = RunStore(self.project, 'batch-completion', github=self.github)
