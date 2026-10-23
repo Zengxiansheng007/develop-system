@@ -563,6 +563,117 @@ class IssueConflictTests(unittest.TestCase):
         self.assertEqual(store.path.read_bytes(), authority)
 
 
+    def test_takeover_unknown_close_keeps_the_unchanged_body_out_of_old_review_conflicts(self):
+        from issue_delivery import DeliveryPending
+        from test_issue_intervention import EventGitHub
+        store = self.ready()
+        self.github = EventGitHub()  # Exercise actual public history observations and a real temporary RunStore.
+        self.sync = IssueSync(self.project, self.github)
+        self.assertEqual(self.sync.sync_once(store)['status'], 'synced')
+        self.github.issue['body'] += '\nHuman prose reviewed without a new remote request.'
+        self.assertEqual(self.sync.continue_sync(store)['reason'], 'body_baseline_changed')
+        self.assertEqual(self.sync.continue_sync(store, body_resolution=self.resolution(store))['status'], 'synced')
+        reviewed = self.sync.status(store)['bindings'][0]
+        self.assertEqual(reviewed['body_reconciliation']['operation_count'], len(reviewed['progress']['operations']))
+        self.github.human_reopen()
+        self.assertEqual(self.sync.continue_sync(store)['status'], 'manual_paused')
+        self.github.issue['body'] += '\nNew human prose explicitly accepted during takeover.'
+        def lose_close_response(kind):
+            if kind == 'close':
+                raise DeliveryPending('http_request_deadline')  # The external effect is applied before this response is lost.
+        self.github.after_write = lose_close_response
+        self.assertEqual(self.sync.take_over(store, ticket_id='77:501',
+            user_reference='synthetic explicit ticket takeover')['reason'], 'http_request_deadline')
+        self.github.after_write = None
+        before = self.sync.status(store)['bindings'][0]
+        self.assertEqual(reviewed['body_reconciliation']['operation_count'], before['intervention']['operation_start'])
+        self.assertEqual(before['body_baseline'], self.github.issue['body'])
+        writes, authority = copy.deepcopy(self.github.writes), store.path.read_bytes()
+        result = IssueSync(self.project, self.github).continue_sync(store)
+        saved = self.sync.status(store)['bindings'][0]
+        self.assertEqual((result['status'], result['reason']), ('pending', 'close_outcome_unknown'))
+        self.assertEqual(saved['body_conflicts'], reviewed['body_conflicts'])  # An unchanged accepted body is not a new conflict.
+        self.assertEqual(saved['intervention']['takeovers'][-1]['body_reconciliation'], reviewed['body_reconciliation'])
+        self.assertEqual(saved['progress']['operations'][:-1], reviewed['progress']['operations'])
+        self.assertEqual(saved['progress']['operations'][-1]['status'], 'unknown')
+        self.assertEqual(saved['progress']['operations'][-1]['confirmation'], 'source_unattributed')
+        self.assertEqual(self.github.writes, writes)
+        self.assertEqual(store.path.read_bytes(), authority)
+
+
+    def test_failed_takeover_retains_review_and_successful_takeover_uses_its_new_body(self):
+        from test_issue_intervention import EventGitHub
+        store = self.ready()
+        self.github = EventGitHub()  # Only controllable external Issue/CI facts vary.
+        self.sync = IssueSync(self.project, self.github)
+        self.assertEqual(self.sync.sync_once(store)['status'], 'synced')
+        self.github.issue['body'] += '\nHuman prose reviewed before takeover.'
+        self.assertEqual(self.sync.continue_sync(store)['reason'], 'body_baseline_changed')
+        self.assertEqual(self.sync.continue_sync(store, body_resolution=self.resolution(store))['status'], 'synced')
+        reviewed = self.sync.status(store)['bindings'][0]
+        self.github.human_reopen()
+        self.assertEqual(self.sync.continue_sync(store)['status'], 'manual_paused')
+        self.github.issue['body'] += '\nNew human prose for explicit takeover.'
+        writes, authority = copy.deepcopy(self.github.writes), store.path.read_bytes()
+        self.github.jobs[1]['conclusion'] = 'failure'
+        self.assertEqual(self.sync.take_over(store, ticket_id='77:501',
+            user_reference='synthetic ticket takeover')['reason'], 'required_ci_not_successful')
+        rejected = self.sync.status(store)['bindings'][0]
+        self.assertEqual(rejected['body_reconciliation'], reviewed['body_reconciliation'])
+        self.assertEqual(rejected['intervention']['status'], 'manual_paused')
+        self.assertEqual(self.github.writes, writes)
+        self.github.jobs[1]['conclusion'] = 'success'
+        self.assertEqual(self.sync.take_over(store, ticket_id='77:501',
+            user_reference='synthetic ticket takeover')['status'], 'synced')
+        current = self.sync.status(store)['bindings'][0]
+        self.assertEqual(current['intervention']['takeovers'][-1]['body_reconciliation'], reviewed['body_reconciliation'])
+        self.assertEqual(current['intervention']['operation_start'], reviewed['body_reconciliation']['operation_count'])
+        expected_body = self.github.issue['body']
+        self.github.issue['body'] += '\nObservable edit after the new acknowledged close.'
+        writes = copy.deepcopy(self.github.writes)
+        self.assertEqual(self.sync.continue_sync(store)['reason'], 'body_baseline_changed')
+        conflict = self.sync.status(store)['bindings'][0]['body_conflicts'][-1]
+        self.assertEqual(conflict['expected_body'], expected_body)  # Preserve the independently passing normal-path boundary.
+        self.assertEqual(self.github.writes, writes)
+        self.assertEqual(store.path.read_bytes(), authority)
+
+
+    def test_current_epoch_equal_count_review_survives_unknown_close_recovery(self):
+        from issue_delivery import DeliveryPending
+        from test_issue_intervention import EventGitHub
+        store = self.ready()
+        self.github = EventGitHub()
+        self.sync = IssueSync(self.project, self.github)
+        self.assertEqual(self.sync.sync_once(store)['status'], 'synced')
+        self.github.human_reopen()
+        self.assertEqual(self.sync.continue_sync(store)['status'], 'manual_paused')
+        self.github.issue['body'] += '\nBody deliberately accepted for the new epoch.'
+        def fail_after_takeover(number):
+            if self.sync.status(store)['bindings'][0]['intervention']['status'] == 'reclaimed':
+                raise DeliveryPending('http_request_deadline')  # Stop at the external read boundary after the public takeover is durably visible.
+        self.github.on_read = fail_after_takeover
+        self.assertEqual(self.sync.take_over(store, ticket_id='77:501',
+            user_reference='synthetic ticket takeover')['reason'], 'http_request_deadline')
+        self.github.on_read = None
+        self.github.issue['body'] += '\nNew current-epoch prose reviewed before any new request.'
+        self.assertEqual(self.sync.continue_sync(store)['reason'], 'body_baseline_changed')
+        def lose_close_response(kind):
+            if kind == 'close':
+                raise DeliveryPending('http_request_deadline')  # The current review must remain applicable while close attribution stays unknown.
+        self.github.after_write = lose_close_response
+        self.assertEqual(self.sync.continue_sync(store, body_resolution=self.resolution(store))['reason'], 'http_request_deadline')
+        self.github.after_write = None
+        reviewed = self.sync.status(store)['bindings'][0]
+        self.assertEqual(reviewed['body_reconciliation']['operation_count'], reviewed['intervention']['operation_start'])
+        writes, authority = copy.deepcopy(self.github.writes), store.path.read_bytes()
+        self.assertEqual(IssueSync(self.project, self.github).continue_sync(store)['reason'], 'close_outcome_unknown')
+        saved = self.sync.status(store)['bindings'][0]
+        self.assertEqual(saved['body_conflicts'], reviewed['body_conflicts'])
+        self.assertEqual(saved['body_reconciliation'], reviewed['body_reconciliation'])
+        self.assertEqual(self.github.writes, writes)
+        self.assertEqual(store.path.read_bytes(), authority)
+
+
     def test_current_body_review_cannot_clear_a_reopen_observed_by_event_history(self):
         from test_issue_intervention import EventGitHub
         store = self.ready()

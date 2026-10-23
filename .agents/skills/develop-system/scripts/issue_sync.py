@@ -634,6 +634,8 @@ class IssueSync:
         takeovers.append({'user_reference': user_reference, 'closure': copy.deepcopy(intervention['closure']),
                           'reopened_event': copy.deepcopy(intervention['reopened_event']), 'events': events,
                           'body_baseline_id': fingerprint(body)})
+        if 'body_reconciliation' in binding:
+            takeovers[-1]['body_reconciliation'] = binding.pop('body_reconciliation')  # Retain the old review with its takeover; it cannot define the newly accepted epoch.
         intervention.update(status='reclaimed', operation_start=len(progress['operations']))
         intervention.pop('closure')
         intervention.pop('reopened_event')
