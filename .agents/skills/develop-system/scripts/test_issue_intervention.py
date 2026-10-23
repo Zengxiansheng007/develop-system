@@ -251,6 +251,131 @@ class InterventionTests(unittest.TestCase):
                 self.assertEqual(self.github.writes, writes)
                 self.assertNotIn('raw-event-error', str(self.sync.status(store)))
 
+    def test_event_429_wait_is_durable_before_retry_and_expiry_rechecks_history(self):
+        store = self.ready()
+        self.assertEqual(self.sync.sync_once(store)['status'], 'synced')
+        clock, original = [1000], store.path.read_bytes()
+        writes = copy.deepcopy(self.github.writes)
+        with write_fixtures.MutationHTTP(self.github, event_error_status=429) as boundary:
+            boundary.adapter.wall_clock = lambda: clock[0]  # Only wall time is controlled; HTTP and durable progress are real.
+            sync = IssueSync(self.project, boundary, clock=lambda: clock[0])
+            first = sync.continue_sync(store)
+            self.assertEqual(first['reason'], 'rate_limited')
+            with self.subTest(obligation='durable service wait'):
+                self.assertEqual(first.get('retry_not_before'), 1060)
+                self.assertEqual(sync.status(store)['bindings'][0]['progress'].get('retry_not_before'), 1060)
+            count = len(boundary.requests)
+            second = IssueSync(self.project, boundary, clock=lambda: clock[0]).continue_sync(store)
+            with self.subTest(obligation='zero requests before expiry'):
+                self.assertEqual(second['reason'], 'rate_limited')
+                self.assertEqual(len(boundary.requests), count)  # A fresh caller must stop locally before event or qualification requests.
+            clock[0], boundary.event_error_status = 1061, None
+            self.github.human_reopen(close_again=True)
+            result = IssueSync(self.project, boundary, clock=lambda: clock[0]).continue_sync(store)
+            self.assertEqual((result['status'], result['reason']), ('manual_paused', 'external_reopen_observed'))
+            self.assertGreater(len(boundary.requests), count)
+        self.assertEqual(self.github.writes, writes)
+        self.assertEqual(store.path.read_bytes(), original)
+
+    def test_saved_wait_precedes_takeover_and_replaced_connection_initialization(self):
+        store, clock = self.pause(), [1000]
+        writes, providers = copy.deepcopy(self.github.writes), []
+        with write_fixtures.MutationHTTP(self.github, event_error_status=429) as boundary:
+            boundary.adapter.wall_clock = lambda: clock[0]
+            sync = IssueSync(self.project, boundary, clock=lambda: clock[0])
+            first = sync.take_over(store, ticket_id='77:501', user_reference='synthetic explicit ticket takeover')
+            self.assertEqual((first['status'], first['reason'], first['retry_not_before']), ('manual_paused', 'rate_limited', 1060))
+            count = len(boundary.requests)
+            def unavailable(reference):
+                providers.append(reference)
+                raise RuntimeError('synthetic unavailable connection')  # A changed external connection must not replace saved waiting with another failure.
+            boundary.adapter.token_provider = unavailable
+            restarted = IssueSync(self.project, boundary, clock=lambda: clock[0])
+            result = restarted.take_over(store, ticket_id='77:501', user_reference='synthetic repeated explicit takeover')
+            self.assertEqual((result['status'], result['reason'], result['retry_not_before']), ('manual_paused', 'rate_limited', 1060))
+            self.assertEqual(restarted.continue_sync(store)['status'], 'manual_paused')
+            self.assertEqual(providers, [])
+            self.assertEqual(len(boundary.requests), count)
+            self.config['connection_reference'] = 'replacement-connection'
+            self.sync.configure(self.config, user_reference='synthetic explicit connection configuration change')
+            self.assertEqual(restarted.take_over(store, ticket_id='77:501', user_reference='synthetic ticket request')['status'], 'unmanaged')
+            saved = sync.status(store)['bindings'][0]
+            self.assertEqual((saved['intervention']['status'], saved['progress']['retry_not_before']), ('manual_paused', 1060))
+            self.assertEqual(providers, [])
+            self.assertEqual(len(boundary.requests), count)
+        self.assertEqual(self.github.writes, writes)
+
+    def test_expired_takeover_wait_rechecks_acceptance_pr_ci_and_mapping(self):
+        for change, reason in (('acceptance', 'acceptance_pending'), ('pr', 'final_pr_not_merged'),
+                               ('ci', 'required_ci_not_successful'), ('mapping', 'body_mapping_changed')):
+            with self.subTest(change=change):
+                self.setUp()
+                store, clock = self.pause(), [1000]
+                original, writes = store.path.read_bytes(), copy.deepcopy(self.github.writes)
+                with write_fixtures.MutationHTTP(self.github, event_error_status=429) as boundary:
+                    boundary.adapter.wall_clock = lambda: clock[0]
+                    sync = IssueSync(self.project, boundary, clock=lambda: clock[0])
+                    first = sync.take_over(store, ticket_id='77:501', user_reference='synthetic first ticket request')
+                    self.assertEqual(first['retry_not_before'], 1060)
+                    clock[0], boundary.event_error_status = 1061, None
+                    if change == 'acceptance':
+                        (self.project / 'candidate.py').write_text('changed = True  # Synthetic unaccepted candidate.\n', encoding='utf-8')
+                    elif change == 'pr':
+                        self.github.pull['merged'] = False
+                    elif change == 'ci':
+                        self.github.jobs[1]['conclusion'] = 'failure'
+                    else:
+                        self.github.issue['body'] = self.github.issue['body'].replace('verified behavior', 'changed requirement')
+                    result = IssueSync(self.project, boundary, clock=lambda: clock[0]).take_over(
+                        store, ticket_id='77:501', user_reference='synthetic new explicit ticket takeover after wait')
+                    self.assertEqual((result['status'], result['reason']), ('manual_paused', reason))
+                self.assertEqual(self.github.writes, writes)
+                self.assertEqual(store.path.read_bytes(), original)
+
+    def test_post_close_event_wait_preserves_unknown_attribution_after_expiry(self):
+        store, clock = self.ready(), [1000]
+        original = store.path.read_bytes()
+        with write_fixtures.MutationHTTP(self.github) as boundary:
+            boundary.adapter.wall_clock = lambda: clock[0]
+            def limit_after_close(kind):
+                if kind == 'close':
+                    boundary.event_error_status = 429  # Acknowledged HTTP close succeeds, but the subsequent event interval is unavailable.
+            self.github.after_write = limit_after_close
+            sync = IssueSync(self.project, boundary, clock=lambda: clock[0])
+            first = sync.sync_once(store)
+            self.assertEqual((first['status'], first['reason'], first['retry_not_before']), ('pending', 'rate_limited', 1060))
+            count, writes = len(boundary.requests), copy.deepcopy(self.github.writes)
+            self.assertEqual([kind for kind, _ in writes], ['body', 'label', 'close'])
+            self.assertEqual(IssueSync(self.project, boundary, clock=lambda: clock[0]).continue_sync(store)['reason'], 'rate_limited')
+            self.assertEqual(len(boundary.requests), count)
+            clock[0], boundary.event_error_status = 1061, None
+            result = IssueSync(self.project, boundary, clock=lambda: clock[0]).continue_sync(store)
+            self.assertEqual((result['status'], result['reason']), ('pending', 'close_outcome_unknown'))
+            self.assertEqual(result['operations'][-1]['confirmation'], 'source_unattributed')
+            self.assertEqual(self.github.writes, writes)
+            self.assertNotIn('intervention', sync.status(store)['bindings'][0])
+        self.assertEqual(store.path.read_bytes(), original)
+
+    def test_an_independent_ticket_is_not_blocked_by_the_first_ticket_service_wait(self):
+        first_store, clock = self.ready(), [1000]
+        self.assertEqual(self.sync.sync_once(first_store)['status'], 'synced')
+        original, first_remote = first_store.path.read_bytes(), self.github
+        with write_fixtures.MutationHTTP(first_remote, event_error_status=429) as boundary:
+            boundary.adapter.wall_clock = lambda: clock[0]
+            waiting = IssueSync(self.project, boundary, clock=lambda: clock[0]).continue_sync(first_store)
+            self.assertEqual(waiting['retry_not_before'], 1060)
+        self.github = EventGitHub()
+        self.github.issue.update(id=502, number=16)
+        self.sync = IssueSync(self.project, self.github)
+        other, state = self.create('other-run', ticket_scopes=[{**self.scope(), 'ticket_id': '77:502'}])
+        self.finish(other, state)
+        self.sync.bind(other, issue_number=16, final_pr={'number': 13, 'repository_id': 77},
+                       acceptance_map={'1': {'text': 'verified behavior', 'context': '## Acceptance criteria'}})
+        self.assertEqual(self.sync.sync_once(other, ticket_id='77:502')['status'], 'synced')
+        self.assertEqual(self.sync.status(first_store)['bindings'][0]['progress']['retry_not_before'], 1060)
+        self.assertEqual(first_store.path.read_bytes(), original)
+        self.assertEqual([kind for kind, _ in first_remote.writes], ['body', 'label', 'close'])
+
 
 if __name__ == '__main__':
     unittest.main()

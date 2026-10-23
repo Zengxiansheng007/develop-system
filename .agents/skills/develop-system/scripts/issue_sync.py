@@ -569,6 +569,15 @@ class IssueSync:
     def sync_once(self, store, *, ticket_id=None):
         return self._run_sync(store, ticket_id=ticket_id)
 
+    def _service_wait(self, binding):
+        deadline = binding['progress'].get('retry_not_before')
+        if type(deadline) in (float, int) and math.isfinite(deadline) and deadline > self.clock():
+            return {**copy.deepcopy(binding['progress']), 'status': 'manual_paused'
+                    if binding.get('intervention', {}).get('status') == 'manual_paused' else 'pending',
+                    'reason': 'rate_limited', 'retry_not_before': deadline, 'delivery_eligible': False,
+                    'ticket_id': binding['ticket_id'], 'binding_id': binding['binding_id']}  # Waiting is local control, never fresh delivery qualification.
+        return None
+
     def _run_sync(self, store, *, ticket_id=None, explicit_continue=False, takeover_reference=None):
         self._state(store)  # Reject a foreign authority before converting local persistence errors into pending.
         try:
@@ -592,6 +601,10 @@ class IssueSync:
                     'ticket_id': binding['ticket_id'], 'binding_id': binding['binding_id']}  # Local human control remains visible even when disabled or disconnected.
         if not self._enrolled(state):
             return {'status': 'unmanaged', 'reason': 'not_enrolled_in_current_generation'}
+        if len(selected) == 1:
+            waiting = self._service_wait(selected[0])
+            if waiting is not None:
+                return waiting  # Do not even initialize a replaced/unavailable connection while its ticket must wait.
         config = configuration(self.project)['configuration']
         try:
             with self.github.round(config['connection_reference']) if hasattr(self.github, 'round') else nullcontext():
@@ -600,7 +613,8 @@ class IssueSync:
             with self._locked():
                 journal = self._journal()
                 selected = [b for b in journal['bindings'] if b['run_id'] == store.run_id and (ticket_id is None or b['ticket_id'] == ticket_id)]
-                progress = {'status': 'pending', 'reason': exc.reason}
+                progress = copy.deepcopy(selected[0]['progress']) if len(selected) == 1 else {}
+                progress.update(status='pending', reason=exc.reason, delivery_eligible=False)  # Connection failures cannot discard an already persisted wait or operation history.
                 if exc.retry_not_before is not None:
                     progress['retry_not_before'] = exc.retry_not_before
                 if len(selected) == 1:
@@ -620,6 +634,9 @@ class IssueSync:
             if len(bindings) != 1:
                 return {'status': 'pending', 'reason': 'explicit_ticket_selection_required'}
             binding = bindings[0]
+            waiting = self._service_wait(binding)
+            if waiting is not None:
+                return waiting  # Recheck under ownership before events, PR/CI, body reads or takeover validation.
             prior_progress = copy.deepcopy(binding['progress'])
             try:
                 if self._observe_intervention(journal, binding, prior_progress,
@@ -627,7 +644,9 @@ class IssueSync:
                     if takeover_reference is None:
                         return {**prior_progress, 'ticket_id': binding['ticket_id'], 'binding_id': binding['binding_id']}
             except DeliveryPending as exc:
-                prior_progress.update(status='pending', reason=exc.reason)
+                prior_progress.update(status='pending', reason=exc.reason, delivery_eligible=False)
+                if exc.retry_not_before is not None:
+                    prior_progress['retry_not_before'] = exc.retry_not_before  # History failures carry the same service wait as every other Adapter request.
                 self._publish_progress(journal, binding, prior_progress)
                 return {**prior_progress, 'ticket_id': binding['ticket_id'], 'binding_id': binding['binding_id']}
             delivery = None  # Facts from a previous round never bypass a fresh PR/CI read.
@@ -642,10 +661,6 @@ class IssueSync:
                 reason = 'original_scope_changed'
             elif [{'id': c['id'], 'text': c['criterion'].strip()} for c in state['acceptance'] if c['id'] in binding['scope']['acceptance_ids']] != binding['acceptance_source']['items']:
                 reason = 'original_acceptance_source_changed'
-            elif (type(binding['progress'].get('retry_not_before')) in (float, int)
-                    and math.isfinite(binding['progress']['retry_not_before']) and binding['progress']['retry_not_before'] > self.clock()):
-                reason = 'rate_limited'
-                delivery = {'retry_not_before': binding['progress']['retry_not_before']}  # A new explicit continue never bypasses a service wait.
             else:
                 try:
                     delivery = qualify_delivery(self.github, configuration(self.project)['configuration']['repository'],
