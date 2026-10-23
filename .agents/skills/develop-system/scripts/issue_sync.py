@@ -24,9 +24,12 @@ def fingerprint(value):
 
 
 def validate_service_wait(value):
-    if (not isinstance(value, dict) or set(value) != {'schema_version', 'host', 'connection_reference', 'resource', 'retry_not_before'}
-            or type(value['schema_version']) is not int or value['schema_version'] != 1
-            or value['host'] != 'api.github.com' or value['resource'] != 'core'
+    fields = {'schema_version', 'host', 'connection_reference', 'resource', 'retry_not_before'}
+    if (not isinstance(value, dict) or type(value.get('schema_version')) is not int
+            or not ((value['schema_version'] == 1 and set(value) == fields and value.get('resource') == 'core')
+                or (value['schema_version'] == 2 and set(value) == fields | {'reason'} and value.get('resource') in {'core', 'rest'}
+                    and value.get('reason') in {'rate_limited', 'remote_service_unavailable'}))
+            or value['host'] != 'api.github.com'
             or not isinstance(value['connection_reference'], str) or not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9_.-]{0,99}', value['connection_reference'])
             or type(value['retry_not_before']) not in (int, float) or not math.isfinite(value['retry_not_before'])):
         raise ValueError('Unknown or unsupported Issue service waiting scope')  # Additive progress metadata cannot import credentials, unknown versions or arbitrary service ownership.
@@ -179,8 +182,8 @@ class IssueSync:
         return journal  # This file contains remote progress and references, never professional verdicts.
 
     def _capture_service_wait(self, progress, error):
-        if error.reason == 'rate_limited' and error.service_scope is not None and error.retry_not_before is not None:
-            progress['service_wait'] = validate_service_wait({'schema_version': 1, **error.service_scope,
+        if error.reason in {'rate_limited', 'remote_service_unavailable'} and error.service_scope is not None and error.retry_not_before is not None:
+            progress['service_wait'] = validate_service_wait({'schema_version': 2, 'reason': error.reason, **error.service_scope,
                 'retry_not_before': error.retry_not_before})  # Persist only safe recognized response facts, retaining the original absolute deadline.
 
     def _shared_service_wait(self, journal, connection_reference):
@@ -191,7 +194,7 @@ class IssueSync:
         return max(waits, key=lambda value: value['retry_not_before']) if waits else None  # Read only already-known synchronization progress; never scan or control development runs.
 
     def _hold_service_wait(self, journal, binding, wait):
-        progress = {**copy.deepcopy(binding['progress']), 'status': 'pending', 'reason': 'rate_limited',
+        progress = {**copy.deepcopy(binding['progress']), 'status': 'pending', 'reason': wait.get('reason', 'rate_limited'),
             'delivery_eligible': False, 'retry_not_before': wait['retry_not_before'], 'service_wait': copy.deepcopy(wait)}
         if binding['progress'].get('status') == 'human_paused':
             progress['human_pause'] = copy.deepcopy(binding['progress'].get('human_pause') or {'reason': 'independent_human_pause'})  # A service hold cannot erase a separate legacy human control.
@@ -277,7 +280,7 @@ class IssueSync:
         repository = config['repository']
         waiting = self._shared_service_wait(self._journal(), config['connection_reference'])
         if waiting is not None:
-            raise DeliveryPending('rate_limited', retry_not_before=waiting['retry_not_before'])  # Binding reads cannot bypass a known applicable pool wait.
+            raise DeliveryPending(waiting.get('reason', 'rate_limited'), retry_not_before=waiting['retry_not_before'])  # Binding reads retain the normalized service cause and cannot bypass its deadline.
         if (not isinstance(final_pr, dict) or set(final_pr) != {'number', 'repository_id'}
                 or type(final_pr['number']) is not int or final_pr['number'] <= 0
                 or type(final_pr['repository_id']) is not int or final_pr['repository_id'] != repository['id']):
@@ -701,7 +704,7 @@ class IssueSync:
         if type(deadline) in (float, int) and math.isfinite(deadline) and deadline > self.clock():
             return {**copy.deepcopy(binding['progress']), 'status': 'manual_paused'
                     if binding.get('intervention', {}).get('status') == 'manual_paused' else 'pending',
-                    'reason': 'rate_limited', 'retry_not_before': deadline, 'delivery_eligible': False,
+                    'reason': binding['progress'].get('service_wait', {}).get('reason', 'rate_limited'), 'retry_not_before': deadline, 'delivery_eligible': False,
                     'ticket_id': binding['ticket_id'], 'binding_id': binding['binding_id']}  # Waiting is local control, never fresh delivery qualification.
         return None
 

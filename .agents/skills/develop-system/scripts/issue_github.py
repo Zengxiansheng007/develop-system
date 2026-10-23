@@ -148,31 +148,27 @@ class GitHubReadAdapter:
             rate_message = isinstance(body, bytes) and len(body) <= self.max_bytes and b'rate limit' in body.lower()
             if status == 429 or (status == 403 and (headers.get('x-ratelimit-remaining') == '0' or 'retry-after' in headers or rate_message)):
                 now, waits = self.wall_clock(), []
-                try:
-                    seconds = float(headers.get('retry-after', ''))
-                    if math.isfinite(seconds) and seconds >= 0:
-                        waits.append(now + seconds)
-                except ValueError:
-                    try:
-                        waits.append(parsedate_to_datetime(headers['retry-after']).timestamp())
-                    except (KeyError, ValueError, TypeError, OverflowError):
-                        pass  # A malformed service hint cannot make the wait unbounded or immediate.
-                try:
-                    reset = float(headers.get('x-ratelimit-reset', ''))
-                    if math.isfinite(reset) and reset > now:
-                        waits.append(reset)
-                except ValueError:
-                    pass
-                wait = max([now, *waits]) if waits else now + 60
-                scope = None
-                if headers.get('x-ratelimit-remaining') == '0' and headers.get('x-ratelimit-resource') == 'core':
+                retry = self._retry_after(headers.get('retry-after'), now)
+                if retry is not None:
+                    waits.append(retry)  # Secondary limits remain binding with positive or absent primary allowance.
+                resource = 'rest'
+                if headers.get('x-ratelimit-remaining') == '0':
                     try:
                         reset = float(headers.get('x-ratelimit-reset', ''))
                         if math.isfinite(reset) and reset > now:
-                            scope = {'host': 'api.github.com', 'connection_reference': self.connection_reference, 'resource': 'core'}  # Only an explicitly exhausted supported pool is shared; no token/actor inference.
+                            waits.append(reset)  # A healthy primary pool's reset cannot extend an unrelated secondary deadline.
+                            if headers.get('x-ratelimit-resource') == 'core':
+                                resource = 'core'
                     except ValueError:
-                        pass  # Unknown scope retains the original ticket-local waiting contract.
+                        pass  # Missing/malformed reset retains GitHub's finite conservative fallback.
+                wait = max(waits) if waits else now + 60
+                scope = {'host': 'api.github.com', 'connection_reference': self.connection_reference, 'resource': resource}  # REST requests share an explicit connection's service instruction, never inferred token aliases or other services.
                 raise DeliveryPending('rate_limited', retry_not_before=wait, service_scope=scope)  # Record the absolute boundary; no sleep or retry loop.
+            if status == 503:
+                wait = self._retry_after(headers.get('retry-after'), self.wall_clock())
+                if wait is not None:
+                    raise DeliveryPending(reason, retry_not_before=wait, service_scope={'host': 'api.github.com',
+                        'connection_reference': self.connection_reference, 'resource': 'rest'})  # RFC9110's explicit503 service instruction uses the same bounded foreground gate.
             if type(status) is int and 300 <= status < 400:
                 reason = 'http_redirect_refused'
             raise DeliveryPending(reason)
@@ -183,6 +179,17 @@ class GitHubReadAdapter:
         except (UnicodeDecodeError, ValueError):
             raise DeliveryPending('remote_invalid_json') from None
         return value, headers
+
+    @staticmethod
+    def _retry_after(value, now):
+        if not isinstance(value, str):
+            return None
+        try:
+            value = value.strip()
+            deadline = now + int(value) if re.fullmatch(r'[0-9]+', value) else parsedate_to_datetime(value).timestamp()  # RFC9110 permits integer delay-seconds or an HTTP date, not floats/exponents.
+            return deadline if math.isfinite(deadline) and deadline > now else None
+        except (ValueError, TypeError, OverflowError):
+            return None  # Invalid, elapsed and nonfinite hints cannot create an unbounded or immediately bypassed rate wait.
 
     def _path(self, repository, suffix=''):
         if (not isinstance(repository, dict) or type(repository.get('id')) is not int or repository['id'] <= 0
