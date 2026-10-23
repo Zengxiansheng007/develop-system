@@ -346,8 +346,8 @@ class IssueSync:
         except ValueError:
             raise DeliveryPending('body_resolution_mapping_invalid') from None  # No old offset, duplicate selection or approximate text adoption.
         for op in progress['operations']:
-            if op['kind'] == 'body' and op['status'] != 'confirmed' and not op.get('response_received'):
-                raise DeliveryPending('previous_request_failed' if op['status'] == 'failed' else 'operation_outcome_unknown')
+            if op['kind'] == 'body' and op['status'] not in {'confirmed', 'failed'} and not op.get('response_received'):
+                raise DeliveryPending('operation_outcome_unknown')  # A known rejection blocks its own operation; an uncertain body outcome cannot be superseded by review.
         resolution = {'user_reference': value['user_reference'], 'body_id': fingerprint(issue['body']),
                       'mapping': copy.deepcopy(mapping), 'operation_count': len(progress['operations'])}
         for conflict in conflicts:
@@ -362,7 +362,21 @@ class IssueSync:
                 and projection.get('candidate_id') == binding['candidate_id']
                 and projection.get('sources') == binding['source_references'])  # Callers supply fresh reads at each distinct stage.
 
+    def _current_body_reference(self, binding, operations):
+        confirmed = [(i, op['expected_after']) for i, op in enumerate(operations)
+                     if op['kind'] == 'body' and op['status'] == 'confirmed']
+        reviewed = binding.get('body_reconciliation')
+        if reviewed and (not confirmed or confirmed[-1][0] < reviewed['operation_count']):
+            return reviewed['body']  # Explicit current-body review remains current until a later confirmed body write.
+        return confirmed[-1][1] if confirmed else binding.get('body_baseline')
+
     def _reconcile_operations(self, journal, binding, progress, issue, *, explicit_continue=False):
+        def pending(reason):
+            expected = self._current_body_reference(binding, progress['operations'])
+            if issue.get('body') != expected:
+                self._record_body_conflict(journal, binding, progress, expected, issue, 'recovery_read', reason)
+            raise DeliveryPending(reason)  # Preserve every observed body difference before any operation-specific early return.
+
         for index, op in enumerate(progress['operations']):
             if (op['kind'] == 'body' and index < binding.get('body_reconciliation', {}).get('operation_count', 0)
                     and (op['status'] == 'confirmed' or op.get('response_received'))):
@@ -376,13 +390,14 @@ class IssueSync:
                 unchanged = (issue.get('body') == previous if op['kind'] == 'body' else
                     isinstance(issue.get('labels'), list) and previous['name'] in issue['labels'] if op['kind'] == 'label' else
                     issue.get('state') == 'open')
-                if not explicit_continue or not unchanged:
-                    raise DeliveryPending('previous_request_failed')
+                if (not explicit_continue or not unchanged
+                        or issue.get('body') != self._current_body_reference(binding, progress['operations'])):
+                    pending('previous_request_failed')  # A changed body must be held before any failed-operation retry is authorized.
                 op['retry_authorized'] = 'explicit_continue_after_remote_read'
                 self._publish_progress(journal, binding, progress)  # Only a new explicit invocation can retry a definitively rejected, still-missing effect.
                 continue
             if op.get('candidate_id') != binding['candidate_id'] or op.get('delivery_sha') != progress['delivery']['sha']:
-                raise DeliveryPending('operation_source_changed')
+                pending('operation_source_changed')
             if op['kind'] == 'body':
                 applied = issue.get('body') == op['expected_after']
             elif op['kind'] == 'label':
@@ -392,19 +407,9 @@ class IssueSync:
                 if op.get('observed_after') != observed or op['status'] != 'unknown':
                     op.update(status='unknown', observed_after=observed, confirmation='source_unattributed')
                     self._publish_progress(journal, binding, progress)  # Preserve the actual closed effect separately from unresolved request attribution.
-                body_values = [(i, item['expected_after']) for i, item in enumerate(progress['operations'])
-                               if item['kind'] == 'body' and item['status'] == 'confirmed']
-                reviewed = binding.get('body_reconciliation')
-                expected_body = (reviewed['body'] if reviewed and (not body_values or body_values[-1][0] < reviewed['operation_count'])
-                                 else body_values[-1][1] if body_values else binding.get('body_baseline'))  # Reviewed current body does not establish unknown close attribution.
-                if issue.get('body') != expected_body:
-                    self._record_body_conflict(journal, binding, progress, expected_body, issue, 'recovery_read', 'close_outcome_unknown')
-                raise DeliveryPending('close_outcome_unknown')  # Closed state alone cannot attribute a lost response to this request.
+                pending('close_outcome_unknown')  # Observed closed state still cannot attribute this request.
             if not applied:
-                if op['kind'] == 'body' and issue.get('body') != op['expected_before']:
-                    self._record_body_conflict(journal, binding, progress, op['expected_after'], issue,
-                                               'recovery_read', 'operation_outcome_unknown')
-                raise DeliveryPending('operation_outcome_unknown')  # Unsent and externally reverted requests are indistinguishable.
+                pending('operation_outcome_unknown')  # Unsent and externally reverted requests remain indistinguishable.
             op['status'], op['confirmation'] = 'confirmed', 'remote_effect_observed'
             self._publish_progress(journal, binding, progress)  # Preserve reconciled steps before sending any missing operation.
 
@@ -420,13 +425,11 @@ class IssueSync:
             raise DeliveryPending('issue_identity_changed')
         if body_resolution is not None:
             self._resolve_body_conflict(journal, binding, progress, state, issue, body_resolution)
-        self._reconcile_operations(journal, binding, progress, issue, explicit_continue=explicit_continue)  # A new instance always observes the remote before recovering intent.
+        self._reconcile_operations(journal, binding, progress, issue,
+                                   explicit_continue=explicit_continue and body_resolution is None)  # Current-body review supplies no new failed-request retry authorization.
         before = issue.get('body')
         body_operations = [op for op in operations if op['kind'] == 'body' and op['status'] == 'confirmed']
-        latest_body_index = max((i for i, op in enumerate(operations) if op['kind'] == 'body' and op['status'] == 'confirmed'), default=-1)
-        reconciliation = binding.get('body_reconciliation')
-        known_body = (reconciliation['body'] if reconciliation and latest_body_index < reconciliation['operation_count']
-                      else body_operations[-1]['expected_after'] if body_operations else None)  # Later confirmed writes supersede the deliberately reviewed current body.
+        known_body = self._current_body_reference(binding, operations)  # Recovery exits and normal writes compare the same current body.
         if (not isinstance(before, str) or (body_operations and before != known_body)
                 or (not body_operations and fingerprint(before) != binding['body_baseline_id'])):
             self._record_body_conflict(journal, binding, progress, known_body if body_operations else binding.get('body_baseline'),

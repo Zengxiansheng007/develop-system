@@ -340,5 +340,199 @@ class IssueConflictTests(unittest.TestCase):
         self.assertEqual(self.github.issue['state'], 'closed')
 
 
+    def test_recovery_early_exits_save_visible_body_difference_without_more_writes(self):
+        from issue_delivery import DeliveryPending
+        for kind, failure, reason in (('body', 'permission_denied', 'previous_request_failed'),
+                                      ('label', 'http_request_deadline', 'operation_outcome_unknown')):
+            with self.subTest(kind=kind):
+                self.setUp()  # Each original review counterexample owns a real temporary RunStore.
+                store = self.ready()
+                def stop(actual, value):
+                    if actual == kind:
+                        raise DeliveryPending(failure)  # Only the external request boundary supplies rejection or uncertainty.
+                self.github.before_write = stop
+                first = self.sync.sync_once(store)
+                operations = copy.deepcopy(first['operations'])
+                self.assertEqual(operations[-1]['status'], 'failed' if kind == 'body' else 'unknown')
+                self.github.before_write = None
+                expected = self.github.issue['body']
+                self.github.issue['body'] += '\nHuman note after the blocked ' + kind + ' request.'
+                observed = self.github.issue['body']
+                writes, authority = copy.deepcopy(self.github.writes), store.path.read_bytes()
+                result = IssueSync(self.project, self.github).continue_sync(store)
+                self.assertEqual((result['status'], result['reason']), ('pending', reason))
+                saved = self.sync.status(store)['bindings'][0]
+                self.assertTrue(saved.get('body_conflicts'), 'A fresh Issue read exposed a body change before this recovery return.')
+                conflict = saved['body_conflicts'][-1]
+                self.assertEqual((conflict['expected_body'], conflict['observed_body']), (expected, observed))
+                self.assertIn('+Human note after the blocked ' + kind + ' request.', conflict['difference'])
+                self.assertEqual(conflict['unfinished_steps'], ['body', 'label:ready-for-agent', 'close'])
+                self.assertEqual(conflict['operations'], operations)
+                self.assertEqual(saved['progress']['operations'], operations)
+                self.assertEqual(self.github.writes, writes)
+                self.assertEqual(self.github.issue['state'], 'open')
+                self.assertEqual(store.path.read_bytes(), authority)
+
+
+    def test_rejected_body_current_mapping_review_does_not_authorize_retry(self):
+        from issue_delivery import DeliveryPending
+        for restored in (False, True):
+            with self.subTest(restored=restored):
+                self.setUp()
+                store = self.ready()
+                original = self.github.issue['body']
+                def reject(kind, value):
+                    raise DeliveryPending('permission_denied')  # Definitive failure is distinct from an uncertain request.
+                self.github.before_write = reject
+                first = self.sync.sync_once(store)
+                operations = copy.deepcopy(first['operations'])
+                self.github.before_write = None
+                self.github.issue['body'] += '\nHuman current body after the rejection.'
+                self.sync.continue_sync(store)
+                if restored:
+                    self.github.issue['body'] = original  # Reviewing this exact current body is still not a retry authorization.
+                resolution, authority = self.resolution(store), store.path.read_bytes()
+                result = IssueSync(self.project, self.github).continue_sync(store, body_resolution=resolution)
+                saved = self.sync.status(store)['bindings'][0]
+                self.assertEqual(saved['body_conflicts'][-1]['status'], 'resolved')
+                self.assertEqual(saved['body_reconciliation']['body'], resolution['expected_body'])
+                self.assertEqual((result['status'], result['reason']), ('pending', 'previous_request_failed'))
+                self.assertEqual(result['operations'], operations)
+                self.assertNotIn('retry_authorized', result['operations'][0])
+                self.assertEqual(self.sync.sync_once(store)['reason'], 'previous_request_failed')
+                self.assertEqual(self.github.writes, [])
+                self.assertEqual(self.github.issue['state'], 'open')
+                self.assertEqual(store.path.read_bytes(), authority)
+
+
+    def test_failed_nonbody_request_checks_body_before_retry_authorization(self):
+        from issue_delivery import DeliveryPending
+        for kind in ('label', 'close'):
+            with self.subTest(kind=kind):
+                self.setUp()
+                store = self.ready()
+                def reject(actual, value):
+                    if actual == kind:
+                        raise DeliveryPending('permission_denied')
+                self.github.before_write = reject
+                first = self.sync.sync_once(store)
+                operations = copy.deepcopy(first['operations'])
+                self.assertEqual((operations[-1]['kind'], operations[-1]['status']), (kind, 'failed'))
+                self.github.before_write = None
+                self.github.issue['body'] += '\nHuman note before retrying the rejected ' + kind + '.'
+                writes = copy.deepcopy(self.github.writes)
+                result = IssueSync(self.project, self.github).continue_sync(store)
+                self.assertEqual(result['operations'], operations)  # Detectable body changes cannot grant a retry before the body hold is saved.
+                self.assertEqual(result['reason'], 'previous_request_failed')
+                saved = self.sync.status(store)['bindings'][0]
+                self.assertEqual(saved['body_conflicts'][-1]['stage'], 'recovery_read')
+                self.assertIn('Human note before retrying', saved['body_conflicts'][-1]['observed_body'])
+                self.assertIn('close', saved['body_conflicts'][-1]['unfinished_steps'])
+                self.assertEqual(self.github.writes, writes)
+                self.assertEqual(self.github.issue['state'], 'open')
+
+
+    def test_unknown_label_body_review_resolves_only_body_and_keeps_unknown_step(self):
+        from issue_delivery import DeliveryPending
+        store = self.ready()
+        def timeout(kind, value):
+            if kind == 'label':
+                raise DeliveryPending('http_request_deadline')
+        self.github.before_write = timeout
+        first = self.sync.sync_once(store)
+        operations, writes = copy.deepcopy(first['operations']), copy.deepcopy(self.github.writes)
+        self.github.before_write = None
+        self.github.issue['body'] += '\nCurrent human note while label outcome is unknown.'
+        self.sync.continue_sync(store)
+        authority = store.path.read_bytes()
+        result = self.sync.continue_sync(store, body_resolution=self.resolution(store))
+        saved = self.sync.status(store)['bindings'][0]
+        self.assertEqual(saved['body_conflicts'][-1]['status'], 'resolved')
+        self.assertEqual((result['status'], result['reason']), ('pending', 'operation_outcome_unknown'))
+        self.assertEqual(result['operations'], operations)
+        self.assertEqual(result['operations'][-1]['status'], 'unknown')
+        self.assertEqual(self.sync.sync_once(store)['reason'], 'operation_outcome_unknown')
+        self.assertEqual(self.sync.continue_sync(store)['reason'], 'operation_outcome_unknown')
+        self.assertEqual(len(self.sync.status(store)['bindings'][0]['body_conflicts']), 1)
+        self.assertEqual(self.github.writes, writes)
+        self.assertIn('ready-for-agent', self.github.issue['labels'])
+        self.assertEqual(self.github.issue['state'], 'open')
+        self.assertEqual(store.path.read_bytes(), authority)
+
+    def test_changed_delivery_retains_body_difference_before_old_operation_stop(self):
+        from issue_delivery import DeliveryPending
+        store = self.ready()
+        def timeout(kind, value):
+            raise DeliveryPending('http_request_deadline')
+        self.github.before_write = timeout
+        first = self.sync.sync_once(store)
+        operations = copy.deepcopy(first['operations'])
+        self.github.before_write = None
+        self.github.issue['body'] += '\nHuman note before a different qualified delivery.'
+        self.github.pull['merge_commit_sha'] = 'c' * 40
+        self.github.files['c' * 40] = copy.deepcopy(self.github.files['b' * 40])
+        self.github.runs[0].update(id=202, head_sha='c' * 40, run_number=2)
+        for job in self.github.jobs:
+            job.update(run_id=202, head_sha='c' * 40)  # Only explicit new synthetic remote delivery facts replace the old SHA.
+        result = self.sync.continue_sync(store)
+        self.assertEqual(result['reason'], 'operation_source_changed')
+        conflict = self.sync.status(store)['bindings'][0]['body_conflicts'][-1]
+        self.assertIn('Human note before a different qualified delivery.', conflict['observed_body'])
+        self.assertEqual(conflict['stage'], 'recovery_read')
+        self.assertEqual(result['operations'], operations)
+        self.assertEqual(self.github.writes, [])
+
+    def test_recovery_body_review_keeps_failed_ticket_isolated_from_independent_ticket(self):
+        from issue_delivery import DeliveryPending
+        first = self.ready()
+        self.github = MultipleIssues()
+        self.sync = IssueSync(self.project, self.github)
+        second, state = self.create('independent-recovery-run', ticket_scopes=[{**self.scope(), 'ticket_id': '77:502'}])
+        self.finish(second, state)
+        self.sync.bind(second, issue_number=16, final_pr={'number': 13, 'repository_id': 77},
+                       acceptance_map={'1': {'text': 'verified behavior', 'context': ''}})
+        def reject(kind, value):
+            if kind == 'body' and self.github.issue['id'] == 501:
+                raise DeliveryPending('permission_denied')
+        self.github.before_write = reject
+        blocked = self.sync.sync_once(first, ticket_id='77:501')
+        operations = copy.deepcopy(blocked['operations'])
+        self.github.before_write = None
+        self.github.issues[15]['body'] += '\nOnly the rejected ticket has this human edit.'
+        self.sync.continue_sync(first, ticket_id='77:501')
+        review = self.sync.continue_sync(first, ticket_id='77:501', body_resolution=self.resolution(first))
+        self.assertEqual(review['reason'], 'previous_request_failed')
+        self.assertEqual(review['operations'], operations)
+        self.assertEqual(self.github.writes, [])
+        self.assertEqual(self.sync.sync_once(second, ticket_id='77:502')['status'], 'synced')
+        self.assertEqual(self.github.issues[15]['state'], 'open')
+        self.assertIn('Only the rejected ticket', self.github.issues[15]['body'])
+        self.assertEqual(self.github.issues[16]['state'], 'closed')
+        self.assertEqual(self.sync.status(first)['bindings'][0]['progress']['operations'], operations)
+
+    def test_recovery_body_review_cannot_clear_independent_issue_human_pause(self):
+        from issue_delivery import DeliveryPending
+        store = self.ready()
+        def reject(kind, value):
+            raise DeliveryPending('permission_denied')
+        self.github.before_write = reject
+        first = self.sync.sync_once(store)
+        operations = copy.deepcopy(first['operations'])
+        self.github.before_write = None
+        self.github.issue['body'] += '\nReviewable body with a separate Issue pause.'
+        self.sync.continue_sync(store)
+        resolution = self.resolution(store)
+        journal = self.project / '.develop-system/issue-sync/bindings.json'
+        value = json.loads(journal.read_text(encoding='utf-8'))
+        value['bindings'][0]['human_pause'] = {'reason': 'synthetic independent Issue pause'}
+        journal.write_text(json.dumps(value), encoding='utf-8')  # External control input, never a forged RunStore professional verdict.
+        for attempt in range(2):
+            result = self.sync.continue_sync(store, body_resolution=resolution)
+            self.assertEqual(result['reason'], 'issue_human_paused')
+            self.assertEqual(result['operations'], operations)
+            self.assertEqual(self.sync.status(store)['bindings'][0]['body_conflicts'][-1]['status'], 'unresolved')
+            self.assertEqual(self.github.writes, [])
+
+
 if __name__ == '__main__':
     unittest.main()
