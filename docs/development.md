@@ -30,6 +30,8 @@ Command receipts from tools/checks.py are independent check-record v2 and requir
 
 The verification entry accepts `--timeout <seconds>` per command (default 300). Use a bounded larger value when observed real Git worktree checks exceed that duration; preserve the original timeout receipt.
 
+CI explicitly selects 1200 seconds per verification command on Windows and 300 on Ubuntu. The 391-test real-Git workflow suite exceeded the previous 300-second Windows envelope in PR #24; the same candidate already has a complete local run at about 1127 seconds. This bounded CI override adjusts the verification envelope; it does not change the local default, test selection, failure handling, or product runtime deadlines, and does not claim a performance improvement. A stalled Windows verification command can now take up to 1200 seconds to be reported. Preserve the original timeout and diagnose any further timeout instead of automatically extending this value.
+
 Update source and related tests/documentation together. Add or remove shipped skills through `release-manifest.json`, with license and dependency review. Keep source provenance immutable as a historical baseline; version control records later edits. A schema change needs an explicit compatibility and migration contract.
 
 Use GitHub Issues in this repository for new develop-system work. The previous local optimization map retains its authority until an explicit map publication records old-to-new links; repository setup does not duplicate its tickets.
