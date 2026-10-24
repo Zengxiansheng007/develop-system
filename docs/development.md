@@ -24,9 +24,13 @@ For changes, start with the affected tests and direct dependants. The release bo
 
 ## Maintenance
 
+Issue synchronization includes creation/accepted-return/successful-assessment/completion lifecycle hooks, explicit delivery updates and completed-run catch-up through the same independently qualified sync seam. Original ticket scope, parent acceptance, controls, source currentness, conflict history and bounded service waits remain authoritative. The public engine contract is in [Issue synchronization](issue-sync/README.md); the shipped [lifecycle and project operations](../.agents/skills/develop-system/references/issue-sync-lifecycle.md) owns configuration, foreground controls and PR handoff instructions. Real configuration remains default-off; local controlled GitHub/HTTP checks do not perform real GitHub writes.
+
 Command receipts from tools/checks.py are independent check-record v2 and require no run. Managed checks separately use dispatched worktree bindings and actual execution-time source observation; see [check records](../.agents/skills/develop-system/references/check-records.md). Repository success is not automatically managed-frame proof. Existing v1 receipts remain historical originals.
 
 The verification entry accepts `--timeout <seconds>` per command (default 300). Use a bounded larger value when observed real Git worktree checks exceed that duration; preserve the original timeout receipt.
+
+CI explicitly selects 1200 seconds per verification command on Windows and 300 on Ubuntu. The 391-test real-Git workflow suite exceeded the previous 300-second Windows envelope in PR #24; the same candidate already has a complete local run at about 1127 seconds. This bounded CI override adjusts the verification envelope; it does not change the local default, test selection, failure handling, or product runtime deadlines, and does not claim a performance improvement. A stalled Windows verification command can now take up to 1200 seconds to be reported. Preserve the original timeout and diagnose any further timeout instead of automatically extending this value.
 
 Update source and related tests/documentation together. Add or remove shipped skills through `release-manifest.json`, with license and dependency review. Keep source provenance immutable as a historical baseline; version control records later edits. A schema change needs an explicit compatibility and migration contract.
 

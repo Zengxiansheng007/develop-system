@@ -21,7 +21,7 @@ jobs:
         with:
           python-version: '3.13'
       - run: python -m pip install -r requirements-checks.txt
-      - run: python -B tools/checks.py --output-dir .scratch/ci-verification
+      - run: python -B tools/checks.py --output-dir .scratch/ci-verification --timeout ${{ runner.os == 'Windows' && 1200 || 300 }} # Bound the complete real-Git suite using its observed slow baseline.
       - uses: actions/upload-artifact@v4
         if: always()
         with:

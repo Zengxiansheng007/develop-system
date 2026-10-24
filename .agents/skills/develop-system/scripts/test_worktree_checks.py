@@ -149,6 +149,19 @@ class WorktreeCheckTests(unittest.TestCase):
         self.assertNotIn(str(note),[p['path'] for p in record['observation']['loaded']])
         self.assertIn('Sensitive',record['stderr'])
 
+    def test_observer_does_not_shadow_target_check_binding_module(self):
+        helper = self.worktree / 'src/check_binding.py'  # A real candidate module shares the collector dependency name.
+        helper.write_text("CANDIDATE_ONLY = 'candidate-source'\n", encoding='utf-8')  # Only the target provides this export.
+        script = self.worktree / 'tests/check.py'  # Keep the public recorder's existing script entry.
+        script.write_text("import sys\nsys.path.insert(0, sys.argv[1])\nfrom check_binding import CANDIDATE_ONLY\nassert CANDIDATE_ONLY == 'candidate-source'\n", encoding='utf-8')  # Resolve the actual candidate after its source path is added.
+        frame = self.dispatch()  # Bind the same real temporary Git worktree as other recorder tests.
+        selection = self.candidate()  # Preserve the declared source/test/config scope.
+        selection['loaded'] = ['tests/check.py', 'src/check_binding.py']  # Require actual execution of both target sources.
+        record = run_record([sys.executable, '-B', str(script), str(self.worktree / 'src')], self.worktree,
+            self.root / 'observer-namespace.json', binding=frame['worktree_binding'], candidate=selection)  # Exercise the public seam without altering module caches.
+        self.assertEqual(record['status'], 'passed', record['stderr'])  # Collector imports must not change target import semantics.
+        self.assertIn(str(helper), [item['path'] for item in record['observation']['loaded']])  # Observation must include the executed candidate module.
+
     def test_resolved_link_targets_keep_sensitive_and_metadata_exclusions(self):
         frame=self.dispatch()
         for index,name in enumerate(('ordinary','.git','credentials','.env.fixture')):

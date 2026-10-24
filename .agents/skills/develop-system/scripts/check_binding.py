@@ -125,25 +125,31 @@ def validate_reference_candidate(record,binding):
         authorized_source(root,binding['source_ranges'],root/file['path'])
 
 
-def candidate_snapshot(binding,selection):
-    root=Path(binding['worktree']['root'])
-    if not isinstance(selection,dict):raise ValueError('Professional candidate selection required')
-    ranges=selection.get('ranges')
+def source_inventory(root, source_ranges, ranges):
+    """Reuse the same target authorization and exclusions for every content inventory."""
+    root = Path(root)
     if not isinstance(ranges,list) or not ranges:raise ValueError('Related candidate ranges required')
     files={}
     for item in ranges:
         if item.get('role') not in {'source','test','config','dependency'}:raise ValueError('Candidate role required')
         start=relative(root,item['path'])
-        authorized_source(root,binding['source_ranges'],root/item['path'])
+        authorized_source(root,source_ranges,root/item['path'])
         if not start.exists():raise ValueError('Related range missing')
         for path in ([start] if start.is_file() else sorted(start.rglob('*'))):
             if '__pycache__' in path.parts or path.suffix=='.pyc':continue  # Bytecode remains outside the source candidate.
-            target=authorized_source(root,binding['source_ranges'],path)  # Directories must pass scope checks even without files.
+            target=authorized_source(root,source_ranges,path)  # Directories must pass scope checks even without files.
             if not path.is_file():continue  # Hash only files after authorizing their actual targets.
             name=path.relative_to(root).as_posix()
             evidence={'path':name,'sha256':hashlib.sha256(target.read_bytes()).hexdigest(),'role':item['role']}
             if name in files and files[name]!=evidence:raise ValueError('Overlapping candidate roles')
             files[name]=evidence
+    return files  # Inventory alone is not a managed execution or a professional acceptance result.
+
+
+def candidate_snapshot(binding,selection):
+    root=Path(binding['worktree']['root'])
+    if not isinstance(selection,dict):raise ValueError('Professional candidate selection required')
+    files=source_inventory(root,binding['source_ranges'],selection.get('ranges'))
     loaded=selection.get('loaded')
     entry=selection.get('entry')
     if not isinstance(loaded,list) or not loaded or entry not in files or any(p not in files for p in loaded):

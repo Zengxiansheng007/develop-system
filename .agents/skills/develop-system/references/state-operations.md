@@ -31,6 +31,8 @@ return --payload <结果文件> 的结构见 [统一执行协议](codex-runtime.
 
 `assess --frame-id <待处理帧> --source-frame-id <专业结论帧> --resolution <专业结论摘要> --evidence <该结论的真实文件>` 只登记来源。来源帧须已完成、无未决发现，且其事件明确列出目标 frame_id；证据必须属于该事件。总路由不能凭自己撰写的文件关闭发现。
 
+项目已纳管时，成功 assess 保存专业来源后进入[工单同步的发现评估分支](issue-sync-lifecycle.md#生命周期与完成条件)，按原票完整资格核对同步；原评估返回形状保持。
+
 业务验收在专业结果 acceptance_checks 返回；每项有 id、status: "passed"、completion_checked、kind、真实 evidence。人工项 kind: human 还须 human_confirmed 与实际 user_reference。接受事件时保存来源，不能在关闭时重新添加或篡改结论。
 
 `complete --payload <引用数组>` 输入只需 `[{"id":"1","source_frame_id":"已回流专业帧"}]`。工具核对每项引用是否对应该事件的 passed 结论、帧及依赖已完成、证据和来源输入当前有效。缺失、失败、过期、人工未确认或调度器生成的验收断言拒绝。文件/hash 不代替专业判断。
@@ -45,6 +47,19 @@ return --payload <结果文件> 的结构见 [统一执行协议](codex-runtime.
 - 当前 T01–T10 候选创建 state v4、registry v3；新帧及回流必须携带 protocol_version: 1。必需助手与明确登记见[扩展接口](extensions.md)，工作树检查资格见[机器检查记录](check-records.md)。state v3 或 registry v2 旧快照显式采用前可读取但不能续写，缺义务字段不能当作空义务。需要评估、明确采用或恢复旧运行时，使用[迁移协议](migration-preview.md)中的 preview-migration / apply-migration / rollback-migration；清单内旧帧的原回传使用 return 留存，已回流专业结论使用[qualify-legacy](legacy-compatibility.md#专业核验)追加核验。暂停时只保存，不应用核验或关闭验收。
 
 局部限制、就绪与完成的含义见[作用范围](scoped-state.md)。
+
+## 工单同步前台入口
+
+项目接入、新运行完整范围、自动节点、暂停收件和 PR 发布交接按[工单同步操作契约](issue-sync-lifecycle.md)执行；随包的[首接模板](issue-sync-project.disabled.json)保持禁用。宿主可向 `RunStore` 或 `main(argv, github=..., token_provider=...)` 注入批准的外部 Adapter/命名 resolver；CLI 不接受凭据值，也不自行搜索凭据。
+
+`init --ticket-scopes <JSON>` 将原票全部 AC/必要闭包与新身份同时固定。`delivery-updated` 重核当前交付；completed 运行的明确补同步使用 `continue-project --user-reference <真实用户继续来源>`，两者不需要 `--revision` 且不写原执行状态：
+
+```powershell
+python -B $workflowTool delivery-updated --entry develop-system --project-root 'C:\project' --run-id checkout
+python -B $workflowTool continue-project --entry develop-system --project-root 'C:\project' --run-id checkout --user-reference '<真实用户明确继续本项目任务的来源>'
+```
+
+这里的运行必须明确指定，来源占位符须替换为真实依据。paused/cancelled 控制与工单人工暂停继续生效；completed 不走 resume。缺少宿主连接时保留解释性同步待办，命令退出成功不代表远端已同步。
 
 ## 扩展与测试
 
