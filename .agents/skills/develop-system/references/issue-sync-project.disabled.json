@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "enabled": false,
+  "project_id": "develop-system",
+  "github_host": "github.com",
+  "repository": {
+    "id": 1416632993,
+    "full_name": "Zengxiansheng007/develop-system"
+  },
+  "target_branch": "main",
+  "required_ci": [
+    {
+      "type": "actions",
+      "workflow_id": 383018657,
+      "workflow": ".github/workflows/check-skills.yml",
+      "event": "push",
+      "branch": "main",
+      "job": "check (windows-latest)"
+    },
+    {
+      "type": "actions",
+      "workflow_id": 383018657,
+      "workflow": ".github/workflows/check-skills.yml",
+      "event": "push",
+      "branch": "main",
+      "job": "check (ubuntu-latest)"
+    }
+  ],
+  "remove_labels": ["ready-for-agent"],
+  "connection_reference": "develop-system",
+  "body_policy": "single-writer"
+}

@@ -30,6 +30,7 @@ license: MIT
 2. 读取 [registry.json](registry.json) 与 [统一执行协议](references/codex-runtime.md)，按任务裁剪计划。已有有效规格、测试或评审结果可复用，来源及版本须保留。
 3. 使用 [状态工具](references/state-operations.md) 创建/恢复目标项目独立 run。当前候选创建 v4；v3 在显式采用前只读。需要预览、明确采用或恢复旧运行时，读取[迁移协议](references/migration-preview.md)及其旧帧兼容入口；真实运行采用须取得单运行授权，能力可用不代表已获授权。v1/v2 不自动续跑。局部限制见[作用范围](references/scoped-state.md)。
    直接 grill、受管访谈或恢复访谈时，先读取 [grill 入口与回流操作](references/grill-routing.md)，通过只读判定确认归属，不使用历史最新运行猜测。
+   工单同步涉及项目接入、新运行绑定、专业回流、交付更新、明确继续（含 completed）、暂停收件或 PR 发布交接时，读取[工单同步操作契约](references/issue-sync-lifecycle.md)。其默认禁用模板与命名连接仅在明确项目授权后采用；PR 交接沿该契约保留合并后 CI 关闭门槛。
 4. 解析实际技能路径并读取正文，记录文件 hash。用户路径和会话目录优先；目录未列出时按项目 .agents/skills、.codex/skills、用户 .agents/skills、.codex/skills 查找。同名只选一个版本。
 5. 分派最早就绪且必要的工作。模板是可裁剪路线，不是每个任务都必须执行全部技能。
 
