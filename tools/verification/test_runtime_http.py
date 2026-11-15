@@ -182,6 +182,31 @@ class HTTPRuntimeTests(unittest.TestCase):
                 self.assertIsNone(process.poll())
                 self.assertEqual(self.send(origin, 'GET', '/items')['names'], [])
 
+    def test_conflict_response_never_acquires_cleanup_rights_over_existing_row(self):
+        for expected_status in (409, 200, 202):
+            with self.subTest(expected_status=expected_status), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                plan = self.plan(root)
+                check = plan['checks'][0]
+                check['requests'][0].update(path='/conflict', status=expected_status,
+                    assertions=[{'path': ['error'], 'equals': 'exists'}],
+                    capture={'created_id': ['id']}, ownership_reason='claimed create-only operation')
+                check['requests'][1]['assertions'][0]['equals'] = ['untouched']
+                check['cleanup']['requests'] = [{'method': 'DELETE', 'path': '/items/{created_id}', 'retry': 'none', 'status': 200,
+                                                'assertions': [{'path': ['deleted'], 'equals': 1}]}]
+                with self.existing(root, plan) as (process, origin):
+                    self.send(origin, 'POST', '/items', {'name': 'untouched'})
+                    _, result, _ = self.run_plan(root, plan)
+                    self.assertIsNone(process.poll())
+                    self.assertEqual(self.send(origin, 'GET', '/items')['names'], ['untouched'])
+                    self.assertEqual(result['runtime_status'], 'unaccepted')
+                    if expected_status in (409, 202):
+                        self.assertFalse(result['checks'])
+                        self.assertTrue(result['blockers'])
+                    else:
+                        self.assertEqual(result['checks'][0]['requests'][0]['http_status'], 409)
+                        self.assertEqual(result['checks'][0]['cleanup']['requests'], [])
+
     def test_redirect_and_slow_stream_do_not_follow_or_exceed_request_budget(self):
         for path in ('/redirect', '/slow'):
             with self.subTest(path=path), tempfile.TemporaryDirectory() as folder:
@@ -211,6 +236,21 @@ class HTTPRuntimeTests(unittest.TestCase):
             evidence = ''.join(p.read_text() for p in output.glob('*.json'))
             for secret in ('body-secret-marker', 'plan-secret-marker', 'session-test-marker', 'header-secret-marker'):
                 self.assertNotIn(secret, evidence)
+
+    def test_sensitive_selection_redacts_expected_plan_echo_and_actual_equally(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            plan = self.plan(root)
+            marker = 'synthetic-auth-token-marker'
+            plan['checks'][0]['requests'].append({'method': 'GET', 'path': '/sensitive', 'retry': 'none', 'status': 200,
+                                                'assertions': [{'path': ['auth_token'], 'equals': marker}]})
+            _, result, output = self.run_plan(root, plan)
+            self.assertEqual(result['runtime_status'], 'passed')
+            self.assertEqual(result['checks'][0]['requests'][-1]['assertions'][0]['actual'], '[REDACTED]')
+            self.assertEqual(result['plan']['checks'][0]['requests'][-1]['assertions'][0]['equals'], '[REDACTED]')
+            for file in output.glob('*.json'):
+                self.assertNotIn(marker, file.read_text(encoding='utf-8'))
+            self.assertIn(marker, (root / 'evidence-plan.json').read_text(encoding='utf-8'))
 
 
 if __name__ == '__main__':

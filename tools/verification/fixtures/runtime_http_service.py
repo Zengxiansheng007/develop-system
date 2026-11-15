@@ -32,6 +32,8 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(raw)
 
     def do_GET(self):
+        if self.path == '/sensitive':
+            return self.reply(200, {'auth_token': 'synthetic-auth-token-marker'})
         if self.path == '/redirect':
             self.send_response(302)
             self.send_header('Location', '/items')
@@ -57,6 +59,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         value = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+        if self.path == '/conflict':
+            with closing(sqlite3.connect(database)) as db:
+                key = db.execute('SELECT rowid FROM items ORDER BY rowid LIMIT 1').fetchone()[0]
+            return self.reply(409, {'error': 'exists', 'id': key})
         with closing(sqlite3.connect(database)) as db:
             cursor = db.execute('INSERT INTO items VALUES(?)', ('wrong' if mode == 'wrong' else value['name'],))
             key = cursor.lastrowid

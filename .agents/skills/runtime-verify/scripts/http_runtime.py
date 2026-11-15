@@ -28,6 +28,12 @@ def path_ok(path):
     return isinstance(path, str) and path.startswith('/') and not path.startswith('//') and not any(c in path for c in '\r\n\\#')
 
 
+def create_success(request, status):
+    """Only completed, attested create operations can acquire cleanup ownership."""
+    return (request.get('method') == 'POST' and request.get('status') in (200, 201)
+            and status == request['status'] and bool(request.get('ownership_reason')))
+
+
 def validate_http(check, root, files):
     from verify import owned_file, relative, python_invocation
     service, cleanup = check['service'], check['cleanup']
@@ -77,7 +83,7 @@ def validate_http(check, root, files):
         validate_request(request)
         for name, path in request.get('capture', {}).items():
             require(re.fullmatch('[a-zA-Z][a-zA-Z0-9_]*', name) and name not in captures and path, 'Unique response ownership capture required')
-            require(request['method'] == 'POST' and request.get('ownership_reason'), 'Resource capture requires create semantics and ownership reason')
+            require(create_success(request, request['status']), 'Resource capture requires completed create success (200/201) and ownership reason')
             captures.add(name)
     cleanup_requests = cleanup.get('requests', [])
     require(isinstance(cleanup_requests, list) and len(cleanup_requests) <= 100, 'Explicit bounded cleanup operations required')
@@ -177,11 +183,16 @@ def select(value, path):
     return value
 
 
+def sensitive_selection(path):
+    """Apply the same selection policy to observed values and echoed expectations."""
+    return isinstance(path, list) and any(re.search(r'(?i)authorization|cookie|password|secret|token|api.?key', str(p)) for p in path)
+
+
 def sensitive(value):
     if isinstance(value, dict):
         def secret_key(key):
             return re.fullmatch(r'(?i)authorization|(?:set-)?cookie|password|secret|(?:access_|refresh_)?token|api.?key', str(key))
-        protected_assertion = isinstance(value.get('path'), list) and any(secret_key(p) for p in value['path'])
+        protected_assertion = sensitive_selection(value.get('path'))
         return {k: '[REDACTED]' if secret_key(k) or (protected_assertion and k in ('actual', 'equals')) else sensitive(v) for k, v in value.items()}
     if isinstance(value, list):
         return [sensitive(v) for v in value]
@@ -197,7 +208,7 @@ def observe_request(origin, request, service, clean, timeout=None):
             passed = actual == assertion['equals']
         except (KeyError, IndexError, TypeError):
             actual, passed = None, False
-        if any(re.search(r'(?i)authorization|cookie|password|secret|token|api.?key', str(p)) for p in assertion['path']):
+        if sensitive_selection(assertion['path']):
             actual = '[REDACTED]'
         assertions.append({'path': assertion['path'], 'actual': sensitive(actual), 'status': 'passed' if passed else 'failed'})
     passed = not response.get('error') and response.get('status') == request['status'] and all(a['status'] == 'passed' for a in assertions)
@@ -266,7 +277,7 @@ def run_http(check, root, candidate, clean):
             observed, response = observe_request(origin, request, service, clean)
             result['requests'].append(observed)
             result['execution_status'] = observed['execution_status']
-            if response.get('status') == request['status'] and not response.get('error'):
+            if create_success(request, response.get('status')) and not response.get('error'):
                 for name, path in request.get('capture', {}).items():
                     value = select(response.get('body'), path)
                     require(type(value) in (str, int) and re.fullmatch('[A-Za-z0-9_-]+', str(value)), 'Unsafe resource identifier')
