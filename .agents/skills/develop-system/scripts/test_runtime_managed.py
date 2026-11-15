@@ -36,7 +36,7 @@ class RuntimeEvidenceTests(unittest.TestCase):
     git_run = worktrees.WorktreeCheckTests.git_run
     authorization = worktrees.WorktreeCheckTests.authorization
 
-    def prepare(self, expected='correct\n', adjustments=None):
+    def prepare(self, expected='correct\n', adjustments=None, narrow_execution=False):
         node = shutil.which('node')
         if not node:
             self.skipTest('Real Node runtime required')
@@ -44,10 +44,13 @@ class RuntimeEvidenceTests(unittest.TestCase):
         self.store = RunStore(self.project, 'runtime')
         self.state = self.store.create('synthetic protocol qualification', [{'step_id': 'a', 'skill_id': 'implement',
             'runtime_contract': {'version': 1, 'criteria': {'1': ['business']}, 'scope_adjustments': adjustments or []}}], ['business'])
-        self.state = self.store.dispatch(self.state['revision'], 'implement', 'v1', 'a', worktree=self.authorization())
+        authorization = self.authorization()
+        if narrow_execution:
+            authorization['execution_roots'] = [str(self.worktree / 'src')]
+        self.state = self.store.dispatch(self.state['revision'], 'implement', 'v1', 'a', worktree=authorization)
         self.parent = self.state['frames'][-1]
         self.state = self.store.dispatch(self.state['revision'], 'runtime-verify', 'v1',
-            parent_frame_id=self.parent['frame_id'], worktree=self.authorization())
+            parent_frame_id=self.parent['frame_id'], worktree=authorization)
         self.frame = self.state['frames'][-1]
         self.plan = {'schema_version': 1, 'task': 'synthetic protocol fixture', 'input_version': 'v1',
             'authorization_reference': 'fixture only', 'environment': 'local Node', 'root': str(self.worktree),
@@ -61,6 +64,13 @@ class RuntimeEvidenceTests(unittest.TestCase):
 
     def run_runtime(self):
         return execute(self.store, self.frame['frame_id'], self.plan, self.root / uuid.uuid4().hex)
+
+    def test_target_execution_cannot_escape_original_bound_roots(self):
+        self.prepare(narrow_execution=True)
+        before = self.store.path.read_bytes()
+        with self.assertRaises(ValueError):
+            self.run_runtime()
+        self.assertEqual(before, self.store.path.read_bytes())
 
     def finish_professionals(self, event):
         self.state = self.store.receive(self.state['revision'], event)

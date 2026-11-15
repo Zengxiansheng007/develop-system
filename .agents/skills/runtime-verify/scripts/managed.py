@@ -7,7 +7,7 @@ import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'develop-system/scripts'))
 from workflow_state import RunStore, file_evidence, require_current
-from runtime_contract import producer_snapshot, qualify, require
+from runtime_contract import producer_snapshot, qualify, require, validate_execution_scope
 from check_binding import source_inventory, validate_worktree
 from verify import verify
 
@@ -23,6 +23,7 @@ def execute(store, frame_id, plan, output):
     require(binding, 'Original worktree binding required')
     validate_worktree(binding)
     require(Path(plan['root']).resolve() == Path(binding['worktree']['root']).resolve(), 'Wrong candidate worktree')
+    validate_execution_scope(plan, binding)
     source_inventory(Path(plan['root']), binding['source_ranges'], plan['candidate'])
     require(plan['input_version'] == frame['input_version'] and plan['scope_adjustments'] == frame['runtime_contract']['scope_adjustments'], 'Wrong input or scope')
     producer = producer_snapshot(frame['skill_path'])

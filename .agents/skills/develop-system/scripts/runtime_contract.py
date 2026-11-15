@@ -2,7 +2,7 @@
 import json
 from pathlib import Path
 
-from check_binding import source_inventory, validate_worktree, digest
+from check_binding import source_inventory, validate_worktree, validate_binding, relative, digest
 
 
 def require(value, message):
@@ -36,6 +36,20 @@ def producer_snapshot(skill_path):
     return {'root': str(root), 'files': list(files.values()), 'id': digest(files)}
 
 
+def validate_execution_scope(plan, binding):
+    """Target process locations retain the original dispatched execution authority."""
+    root = Path(plan['root']).resolve()
+    for check in plan['checks']:
+        if check.get('kind') == 'http':
+            service = check['service']
+            if service['mode'] != 'owned':
+                continue  # Existing service is observed, never launched in a new target cwd.
+            cwd = service['cwd']
+        else:
+            cwd = check['cwd']
+        validate_binding(binding, relative(root, cwd))
+
+
 def qualify(state, frame, evidence):
     """Validate provenance/currentness and professional consistency, not business truth."""
     from workflow_state import file_evidence
@@ -58,6 +72,7 @@ def qualify(state, frame, evidence):
     plan = result['plan']
     require(plan['input_version'] == frame['input_version'] and plan['scope_adjustments'] == contract['scope_adjustments'], 'Runtime input or scope adjustment mismatch')
     require(Path(plan['root']).resolve() == Path(binding['worktree']['root']).resolve(), 'Runtime candidate root mismatch')
+    validate_execution_scope(plan, binding)
     candidate = result.get('candidate')
     if candidate:
         files = source_inventory(Path(plan['root']), binding['source_ranges'], plan['candidate'])
