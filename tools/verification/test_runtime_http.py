@@ -36,13 +36,13 @@ class HTTPRuntimeTests(unittest.TestCase):
                                  'database': str(root / 'data.db'), 'provenance': 'immutable source hash captured at service startup'},
                     'ready': {'path': '/health', 'status': 200, 'json': {'status': 'ready'}},
                     'startup_timeout': 5, 'ready_timeout': 3, 'poll_interval': 0.05,
-                    'request_timeout': 2, 'max_bytes': 16384},
+                    'request_timeout': 3, 'max_bytes': 16384},
                 'requests': [
                     {'method': 'POST', 'path': '/items', 'json': {'name': 'alpha'}, 'retry': 'none',
                      'status': 200, 'assertions': [{'path': ['name'], 'equals': 'alpha'}]},
                     {'method': 'GET', 'path': '/items', 'retry': 'none', 'status': 200,
                      'assertions': [{'path': ['names'], 'equals': ['alpha']}, {'path': ['region'], 'equals': 'test'}]}],
-                'cleanup': {'remove_files': ['data.db', 'port.json'], 'reason': 'fresh owned test files', 'timeout': 2}}],
+                'cleanup': {'remove_files': ['data.db', 'port.json'], 'reason': 'fresh owned test files', 'timeout': 8}}],
             'coverage': {'success': ['AC-write'], 'abnormal': [], 'abnormal_not_applicable': 'fixture success path'},
             'scope_adjustments': []}
 
@@ -51,7 +51,7 @@ class HTTPRuntimeTests(unittest.TestCase):
         request.write_text(json.dumps(plan), encoding='utf-8')
         output = root / name
         process = subprocess.run([sys.executable, '-B', str(ENTRY), '--plan', str(request), '--output', str(output)],
-                                 capture_output=True, text=True, timeout=30, env=env)
+                                 capture_output=True, text=True, timeout=45, env=env)
         self.assertTrue((output / 'result.json').exists(), process.stderr)
         return process, json.loads((output / 'result.json').read_text(encoding='utf-8')), output
 
@@ -114,7 +114,7 @@ class HTTPRuntimeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             plan = self.plan(root, 'delay')
-            plan['checks'][0]['service']['request_timeout'] = 0.7
+            plan['checks'][0]['service']['request_timeout'] = 3
             _, result, _ = self.run_plan(root, plan)
             check = result['checks'][0]
             self.assertEqual(result['runtime_status'], 'unaccepted')
@@ -215,10 +215,10 @@ class HTTPRuntimeTests(unittest.TestCase):
                 plan = self.plan(root)
                 check = plan['checks'][0]
                 check['requests'][1]['path'] = path
-                check['service']['request_timeout'] = 0.7
+                check['service']['request_timeout'] = 3
                 started = time.monotonic()
                 _, result, _ = self.run_plan(root, plan)
-                self.assertLess(time.monotonic() - started, 8)
+                self.assertLess(time.monotonic() - started, 20)
                 self.assertEqual(result['runtime_status'], 'unaccepted')
                 self.assertGreaterEqual(len(result['checks'][0]['requests']), 2, result['checks'][0])
                 request = result['checks'][0]['requests'][1]

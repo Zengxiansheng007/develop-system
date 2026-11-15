@@ -12,7 +12,8 @@ import time
 
 database, discovery, instance, mode = sys.argv[1:]
 source = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
-correlation_fields = mode.split('-') if mode.startswith(('token-', 'id-token')) else None
+mode_fields = mode.split('-')
+correlation_fields = mode_fields if len(mode_fields) >= 2 and all(f in ('id', 'token') for f in mode_fields[:2]) else None
 correlation_value = '1' if mode.endswith('-short') else 'synthetic-job-token-28'
 with closing(sqlite3.connect(database)) as db:
     db.execute('CREATE TABLE jobs(state TEXT, total INTEGER, error TEXT)')
@@ -51,6 +52,8 @@ class Handler(BaseHTTPRequestHandler):
         if mode == 'missing_id':
             return self.reply(202, {'state': 'pending'})
         if correlation_fields:
+            if mode.endswith('-acceptedarray'):
+                return self.reply(202, {'rows': [{correlation_fields[0]: correlation_value}], 'state': 'pending'})
             return self.reply(202, {correlation_fields[0]: correlation_value, 'state': 'pending'})
         self.reply(202, {'id': key, 'state': 'pending'})
 
@@ -74,6 +77,8 @@ class Handler(BaseHTTPRequestHandler):
             time.sleep(8)
         field = correlation_fields[1] if correlation_fields else 'id'
         identifier = correlation_value if correlation_fields else key + 1 if mode == 'wrong_job' else key
+        if mode.endswith('-responsearray'):
+            return self.reply(200, {'rows': [{field: identifier}], 'state': row[0], 'states': [row[0]], 'total': row[1]})
         self.reply(200, {field: identifier,
                          'state': row[0], 'total': row[1], 'error': row[2],
                          'trace': self.headers.get('Authorization')})

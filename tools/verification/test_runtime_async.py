@@ -209,6 +209,62 @@ class AsyncRuntimeTests(unittest.TestCase):
             self.assertEqual(poll['observations'][-1]['assertions'][2]['actual']['id'], '[REDACTED]')
             self.assertEqual(result['plan']['checks'][0]['requests'][0]['poll']['assertions'][1]['equals'], '[REDACTED]')
 
+    def array_correlation_plan(self, root, side, ordinary=False):
+        accepted_array = side in ('accepted', 'acceptance_assertion')
+        mode = 'id-token-acceptedarray' if accepted_array else 'id-id-responsearray' if ordinary else 'token-id-responsearray'
+        plan = self.plan(root, mode)
+        request = plan['checks'][0]['requests'][0]
+        poll = request['poll']
+        accepted_path = ['rows', 0, 'id'] if accepted_array else ['id' if ordinary else 'token']
+        response_path = ['token'] if accepted_array else ['rows', 0, 'id']
+        poll['correlation'] = {'accepted_path': accepted_path, 'response_path': response_path}
+        marker = 'synthetic-job-token-28'
+        if accepted_array:
+            request['assertions'].append({'path': ['rows'], 'equals': [{'id': marker}]})
+        else:
+            poll['assertions'].append({'path': ['rows'], 'equals': [{'id': marker}]})
+        request['assertions'].append({'path': list(accepted_path), 'equals': marker})
+        poll['assertions'].append({'path': list(response_path), 'equals': marker})
+        return plan, marker
+
+    def test_sensitive_negative_array_selectors_are_safely_blocked_before_launch(self):
+        for location in ('accepted', 'response', 'acceptance_assertion', 'poll_assertion', 'state'):
+            with self.subTest(location=location), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                plan, marker = self.array_correlation_plan(root, location)
+                request = plan['checks'][0]['requests'][0]
+                poll = request['poll']
+                if location in ('accepted', 'response'):
+                    poll['correlation'][location + '_path'][1] = -1
+                elif location == 'acceptance_assertion':
+                    request['assertions'][-1]['path'][1] = -1
+                elif location == 'poll_assertion':
+                    poll['assertions'][-1]['path'][1] = -1
+                else:
+                    poll['state_path'] = ['states', -1]
+                _, result, output = self.run_plan(root, plan)
+                for artifact in output.glob('*.json'):
+                    self.assertNotIn(marker, artifact.read_text(encoding='utf-8'))
+                self.assertEqual(result['runtime_status'], 'unaccepted')
+                self.assertFalse(result['checks'])
+                self.assertTrue(result['blockers'])
+                self.assertFalse(list(output.glob('http-*.json')))
+                self.assertFalse((root / 'data.db').exists())
+                self.assertFalse((root / 'port.json').exists())
+
+    def test_positive_sensitive_array_selectors_and_ordinary_negative_indices_still_work(self):
+        for side, ordinary in (('accepted', False), ('response', False), ('response', True)):
+            with self.subTest(side=side, ordinary=ordinary), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                plan, marker = self.array_correlation_plan(root, side, ordinary)
+                if ordinary:
+                    plan['checks'][0]['requests'][0]['poll']['correlation']['response_path'][1] = -1
+                _, result, output = self.run_plan(root, plan)
+                self.assertEqual(result['runtime_status'], 'passed', result)
+                if not ordinary:
+                    for artifact in output.glob('*.json'):
+                        self.assertNotIn(marker, artifact.read_text(encoding='utf-8'))
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -109,6 +109,8 @@ def validate_poll(request):
             not any(c in poll['path'].replace('{correlation}', '') for c in '{}'), 'Poll path must bind accepted correlation once')
     for path in (poll['correlation']['accepted_path'], poll['correlation']['response_path'], poll['state_path']):
         require(isinstance(path, list) and path and all(type(p) in (str, int) for p in path), 'Explicit correlation/state selectors required')
+    require(not sensitive_correlation(poll) or not negative_poll_selector(request),
+            'Sensitive async correlation requires nonnegative array selectors')
     states = []
     for name in ('pending', 'success', 'failure'):
         values = poll[name]
@@ -217,6 +219,20 @@ def sensitive_correlation(poll):
     return isinstance(correlation, dict) and any(sensitive_selection(correlation.get(k)) for k in ('accepted_path', 'response_path'))
 
 
+def negative_poll_selector(request):
+    poll = request.get('poll')
+    if not isinstance(poll, dict):
+        return False
+    correlation = poll.get('correlation')
+    paths = [poll.get('state_path')]
+    if isinstance(correlation, dict):
+        paths.extend(correlation.get(k) for k in ('accepted_path', 'response_path'))
+    for operation in (request, poll):
+        if isinstance(operation.get('assertions'), list):
+            paths.extend(a.get('path') for a in operation['assertions'] if isinstance(a, dict))
+    return any(isinstance(path, list) and any(type(key) is int and key < 0 for key in path) for path in paths)
+
+
 def mask_selected(value, path, selector):
     """Mask a known selected field, including inside ancestor object/array selections."""
     if not isinstance(path, list) or not isinstance(selector, list):
@@ -234,10 +250,11 @@ def mask_selected(value, path, selector):
     return value
 
 
-def mask_selection_record(record, selector):
+def mask_selection_record(record, selector, redact_all=False):
     if not isinstance(record, dict):
         return record
-    return {k: mask_selected(v, record.get('path'), selector) if k in ('actual', 'equals') else v for k, v in record.items()}
+    return {k: ('[REDACTED]' if redact_all else mask_selected(v, record.get('path'), selector))
+            if k in ('actual', 'equals') else v for k, v in record.items()}
 
 
 def sensitive(value):
@@ -248,10 +265,12 @@ def sensitive(value):
         result = {k: '[REDACTED]' if secret_key(k) or (protected_assertion and k in ('actual', 'equals')) else sensitive(v) for k, v in value.items()}
         poll = value.get('poll')
         if sensitive_correlation(poll):
+            # Unsupported aliases must not leak through the rejected plan's echo.
+            redact_all = negative_poll_selector(value)
             for target, selector in ((result, poll['correlation'].get('accepted_path')),
                                      (result['poll'], poll['correlation'].get('response_path'))):
                 if isinstance(target.get('assertions'), list):
-                    target['assertions'] = [mask_selection_record(a, selector) for a in target['assertions']]
+                    target['assertions'] = [mask_selection_record(a, selector, redact_all) for a in target['assertions']]
         return result
     if isinstance(value, list):
         return [sensitive(v) for v in value]

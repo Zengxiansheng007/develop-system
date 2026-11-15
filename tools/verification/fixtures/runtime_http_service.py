@@ -42,10 +42,10 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == '/slow':
             self.send_response(200)
             self.end_headers()
-            for _ in range(20):
+            for _ in range(80):
                 self.wfile.write(b' ')
                 self.wfile.flush()
-                time.sleep(0.15)
+                time.sleep(0.1)
             return
         if self.path == '/identity':
             return self.reply(200, {'source_sha256': source, 'instance_id': instance,
@@ -68,7 +68,7 @@ class Handler(BaseHTTPRequestHandler):
             key = cursor.lastrowid
             db.commit()
         if mode == 'delay':
-            time.sleep(3)
+            time.sleep(8)
         if mode == 'cleanup':
             Path('residual').mkdir()
         self.reply(200, {'id': key, 'name': value['name'], 'region': 'test'})
