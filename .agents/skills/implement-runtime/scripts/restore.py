@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 from pathlib import Path
 import subprocess
 import tempfile
@@ -20,7 +21,11 @@ def digest(data):
 def safe(path):
     path = path.absolute()
     for part in (path, *path.parents):
-        if part.is_symlink() or (hasattr(part, 'is_junction') and part.is_junction()):
+        try:
+            attributes = getattr(part.lstat(), 'st_file_attributes', 0)
+        except FileNotFoundError:
+            attributes = 0
+        if part.is_symlink() or attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT:
             raise ValueError('Symlink/junction outside restore contract')
     return path.resolve()
 
@@ -50,14 +55,20 @@ def check_hook(data):
 
 def check_references(root, data):
     # Only local Markdown links: remote references are not downloaded or qualified.
+    references = {}
     for owner, body in ((root / 'implement/SKILL.md', data),
                         (root / 'implement-runtime/SKILL.md', (root / 'implement-runtime/SKILL.md').read_bytes())):
-        for link in re.findall(r'\[[^\]]*\]\(([^)]+)\)', body.decode('utf-8')):
+        text = body.decode('utf-8')
+        if re.search(r'\[[^\]\n]+\]\s*\[[^\]\n]*\]|^\s{0,3}\[[^\]\n]+\]:', text, re.MULTILINE):
+            raise ValueError('Unsupported reference-style Markdown; use explicit inline links for review')
+        for link in re.findall(r'\[[^\]]*\]\(([^)]+)\)', text):
             if '://' in link or link.startswith('#'):
                 continue
             target = safe(owner.parent / link.split('#')[0])
             if root not in target.parents or not target.is_file():
                 raise ValueError('Missing or unsafe reference: ' + link)
+            references[target.relative_to(root).as_posix()] = digest(target.read_bytes())
+    return references
 
 
 def prepare(args, root, snapshot):
@@ -82,7 +93,7 @@ def prepare(args, root, snapshot):
     if merged.returncode:
         raise ValueError('Incompatible textual merge; retain inputs and review conflicts manually')
     check_hook(merged.stdout)
-    check_references(root, merged.stdout)
+    dependencies.update(check_references(root, merged.stdout))
     snapshot.mkdir(parents=True, exist_ok=False)
     blobs = {'local': local, 'base': base, 'candidate': candidate, 'merged': merged.stdout}
     for name, data in blobs.items():
@@ -105,8 +116,9 @@ def restore(root, snapshot):
             raise ValueError('Snapshot content changed')
         blobs[name] = data
     check_hook(blobs['merged'])
-    check_references(root, blobs['merged'])
-    if inventory(root) != manifest['dependencies']:
+    dependencies = inventory(root)
+    dependencies.update(check_references(root, blobs['merged']))
+    if dependencies != manifest['dependencies']:
         raise ValueError('Dependencies changed or references missing; prepare a new reviewed update')
     target = safe(root / 'implement/SKILL.md')
     current = target.read_bytes()

@@ -12,7 +12,7 @@ Use this protocol only in an explicitly authorized isolated skills tree. The ext
 python -B <skills>/implement-runtime/scripts/restore.py prepare --skills-root <skills> --base <pristine-SKILL.md> --candidate <reviewed-new-SKILL.md> --snapshot <new-snapshot> --review <review-reference>
 ```
 
-Completion: `action=prepared`. Preparation checks the pinned base hash, unique exact hook, local Markdown references in the merged entry and extension entry, and required sibling sources/licenses. It stores original local/base/candidate/merged bytes, source identity and dependency hashes. Git `merge-file --stdout` preserves nonconflicting changes on both sides; conflicts block preparation without changing the target. Keep failed inputs and the original command evidence. The snapshot is trusted local recovery data, not a signed authorization document.
+Completion: `action=prepared`. Preparation checks the pinned base hash, unique exact hook, direct inline local Markdown references in the merged entry and extension entry, and required sibling sources/licenses. Reference-style Markdown is explicitly unsupported and blocks preparation; use explicit inline paths for review. All resolved direct local references are hash-bound, including files outside the six required skill directories. This is a bounded direct-reference check, not a recursive Markdown parser or remote-link verifier. It stores original local/base/candidate/merged bytes, source identity and dependency hashes. Git `merge-file --stdout` preserves nonconflicting changes on both sides; conflicts block preparation without changing the target. Keep failed inputs and the original command evidence. The snapshot is trusted local recovery data, not a signed authorization document.
 
 ## Replace and restore
 

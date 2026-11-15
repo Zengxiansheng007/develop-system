@@ -1,5 +1,6 @@
 """Public restoration seam; textual recovery is not model qualification."""
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -43,6 +44,51 @@ class RestoreTests(unittest.TestCase):
             self.assertIn('reference', proc.stdout.lower())
             self.assertEqual(target.read_bytes(), local)
             self.assertFalse((root / 'snapshot').exists())
+
+    def test_reference_style_links_fail_explicitly(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            skills, target, local, candidate = self.fixture(root)
+            candidate.write_bytes(candidate.read_bytes().replace(b'Keep task evidence local.',
+                                  b'Read [policy][p].\n\n[p]: ../missing/SKILL.md'))
+            proc = self.prepare(skills, root / 'snapshot', candidate)
+            self.assertNotEqual(proc.returncode, 0, proc.stdout)
+            self.assertIn('reference-style', proc.stdout)
+            self.assertEqual(target.read_bytes(), local)
+
+    def test_additional_referenced_file_is_bound_against_drift(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            skills, target, local, candidate = self.fixture(root)
+            candidate.write_bytes(candidate.read_bytes().replace(b'Keep task evidence local.',
+                                  b'Read [diagnosis](../diagnosing-bugs/SKILL.md).'))
+            snapshot = root / 'snapshot'
+            proc = self.prepare(skills, snapshot, candidate)
+            self.assertEqual(proc.returncode, 0, proc.stdout)
+            target.write_bytes(candidate.read_bytes())
+            dependency = skills / 'diagnosing-bugs/SKILL.md'
+            dependency.write_bytes(dependency.read_bytes() + b'\nChanged after review.\n')
+            proc = self.call(skills, 'restore', snapshot)
+            self.assertNotEqual(proc.returncode, 0, proc.stdout)
+            self.assertEqual(target.read_bytes(), candidate.read_bytes())
+
+    def test_snapshot_through_directory_link_is_rejected(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            skills, target, local, candidate = self.fixture(root)
+            outside = root / 'outside'
+            outside.mkdir()
+            link = root / 'linked'
+            if os.name == 'nt':
+                result = subprocess.run(['cmd', '/c', 'mklink', '/J', str(link), str(outside)],
+                                        capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            else:
+                link.symlink_to(outside, target_is_directory=True)
+            proc = self.prepare(skills, link / 'snapshot', candidate)
+            self.assertNotEqual(proc.returncode, 0, proc.stdout)
+            self.assertFalse((outside / 'snapshot').exists())
+            self.assertEqual(target.read_bytes(), local)
 
     def test_conflicting_upstream_preserves_local_and_no_snapshot(self):
         with tempfile.TemporaryDirectory() as folder:
