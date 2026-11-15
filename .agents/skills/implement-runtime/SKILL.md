@@ -16,4 +16,4 @@ This sibling directory is local source, outside the upstream `implement/` replac
 
 Security differential audit is **explicit-only**. Security-related task wording does not select it, create an audit obligation, or mark it done. Runtime verification grants no installation, deployment, production write, global modification, data export or publication authority.
 
-For a replaced upstream skill, first verify the new implementation sequence and sibling references, then restore exactly one marked loading block under existing authorization. Missing/conflicting references block runtime qualification. Preservation of files does not prove upgrade compatibility; fresh implement-entry execution is required. Automated restoration and upgrade qualification are a later ticket.
+For an upstream update or overwritten entry, follow [the reviewed restoration protocol](references/upgrade.md). Prepare the local backup and reviewed three-way merge before replacement, then restore exactly one hook. Missing references or conflicts block restoration. A restored entry remains runtime-unqualified until fresh implement-entry execution proves the required behavior.
