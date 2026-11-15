@@ -26,6 +26,8 @@ For changes, start with the affected tests and direct dependants. The release bo
 
 ## Maintenance
 
+The manifest also ships [security-differential-audit](../.agents/skills/security-differential-audit/SKILL.md), an explicit-only independent entry. Its adapted text is CC BY-SA 4.0, an exception to repository MIT; retain its exact LICENSE, SOURCE.md and source.json when packaging. [T08](runtime-verification/t08.md) records reuse and validation boundaries.
+
 For reviewed upstream implement replacement, use [T07 restoration](runtime-verification/t07.md) and its shipped public protocol. Restoring an entry does not qualify its runtime behavior.
 
 Issue synchronization includes creation/accepted-return/successful-assessment/completion lifecycle hooks, explicit delivery updates and completed-run catch-up through the same independently qualified sync seam. Original ticket scope, parent acceptance, controls, source currentness, conflict history and bounded service waits remain authoritative. The public engine contract is in [Issue synchronization](issue-sync/README.md); the shipped [lifecycle and project operations](../.agents/skills/develop-system/references/issue-sync-lifecycle.md) owns configuration, foreground controls and PR handoff instructions. Real configuration remains default-off; local controlled GitHub/HTTP checks do not perform real GitHub writes.

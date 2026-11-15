@@ -1,5 +1,9 @@
 MIT License
 
+Exception: .agents/skills/security-differential-audit/ contains adaptations of
+Trail of Bits differential-review under CC BY-SA 4.0, not this MIT license.
+See that directory's LICENSE and SOURCE.md for exact terms and attribution.
+
 Copyright (c) 2026 Matt Pocock
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
