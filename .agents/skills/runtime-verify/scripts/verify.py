@@ -32,6 +32,9 @@ def redactor(plan):
         if isinstance(check, dict) and check.get('kind') == 'http':
             for request in check.get('requests', []) + check.get('cleanup', {}).get('requests', []):
                 header_names.extend(request.get('headers_env', {}).values())
+                poll = request.get('poll')
+                if isinstance(poll, dict) and isinstance(poll.get('headers_env'), dict):
+                    header_names.extend(poll['headers_env'].values())
     values = [os.environ[n] for n in names + header_names if isinstance(n, str) and os.environ.get(n)]
     def clean(value):
         if isinstance(value, str):

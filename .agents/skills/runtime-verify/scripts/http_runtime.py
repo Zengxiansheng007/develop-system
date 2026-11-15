@@ -81,6 +81,9 @@ def validate_http(check, root, files):
     captures = set()
     for request in requests:
         validate_request(request)
+        require(request['status'] != 202 or 'poll' in request, 'HTTP 202 acceptance requires terminal polling')
+        if 'poll' in request:
+            validate_poll(request)
         for name, path in request.get('capture', {}).items():
             require(re.fullmatch('[a-zA-Z][a-zA-Z0-9_]*', name) and name not in captures and path, 'Unique response ownership capture required')
             require(create_success(request, request['status']), 'Resource capture requires completed create success (200/201) and ownership reason')
@@ -88,11 +91,32 @@ def validate_http(check, root, files):
     cleanup_requests = cleanup.get('requests', [])
     require(isinstance(cleanup_requests, list) and len(cleanup_requests) <= 100, 'Explicit bounded cleanup operations required')
     for request in cleanup_requests:
+        require('poll' not in request, 'Cleanup does not submit asynchronous operations')
         tokens = re.findall(r'\{([a-zA-Z][a-zA-Z0-9_]*)\}', request['path'])
         require(tokens and set(tokens) <= captures, 'Cleanup must address captured owned resource identifiers')
         validate_request(request)
     if service['mode'] == 'existing' and any(r['method'] != 'GET' for r in requests):
         require(cleanup_requests or cleanup.get('external_owner'), 'Existing-service writes need scoped cleanup or explicit external owner')
+
+
+def validate_poll(request):
+    poll = request['poll']
+    require(isinstance(poll, dict), 'Explicit poll object required')
+    require(request['method'] == 'POST' and request['status'] in (200, 201, 202), 'Polling requires successful operation acceptance')
+    validate_request(poll)
+    require(poll['method'] == 'GET' and 'json' not in poll and 'poll' not in poll and 'capture' not in poll, 'Polling is read-only GET')
+    require(poll['path'].count('{correlation}') == 1 and
+            not any(c in poll['path'].replace('{correlation}', '') for c in '{}'), 'Poll path must bind accepted correlation once')
+    for path in (poll['correlation']['accepted_path'], poll['correlation']['response_path'], poll['state_path']):
+        require(isinstance(path, list) and path and all(type(p) in (str, int) for p in path), 'Explicit correlation/state selectors required')
+    states = []
+    for name in ('pending', 'success', 'failure'):
+        values = poll[name]
+        require(isinstance(values, list) and values and all(isinstance(v, str) and v for v in values), 'Explicit async state sets required')
+        states.extend(values)
+    require(len(states) == len(set(states)), 'Async states must be disjoint')
+    require(bounded(poll.get('timeout')) and bounded(poll.get('interval')) and
+            type(poll.get('max_attempts')) is int and 0 < poll['max_attempts'] <= 10000, 'Explicit bounded polling budgets required')
 
 
 def validate_request(request):
@@ -218,6 +242,59 @@ def observe_request(origin, request, service, clean, timeout=None):
                   'error': response.get('error'), 'assertions': assertions, 'response_policy': 'headers/raw body omitted; selected JSON assertions only'}), response
 
 
+def poll_terminal(origin, poll, accepted, service, clean):
+    """Correlate read-only observations; acceptance never grants cleanup ownership."""
+    result = {'status': 'failed', 'outcome': 'not_run', 'observations': [],
+              'budget': {k: poll[k] for k in ('timeout', 'interval', 'max_attempts')}}
+    started = time.monotonic()
+    try:
+        value = select(accepted.get('body'), poll['correlation']['accepted_path'])
+        require(type(value) in (str, int) and re.fullmatch('[A-Za-z0-9_-]+', str(value)), 'Unsafe or missing accepted correlation')
+        result['accepted_correlation'] = {'path': poll['correlation']['accepted_path'], 'actual': value}
+        request = {**poll, 'path': poll['path'].replace('{correlation}', str(value))}
+        deadline = started + poll['timeout']
+        for _ in range(poll['max_attempts']):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                result['outcome'] = 'deadline'
+                break
+            observed, response = observe_request(origin, request, service, clean, remaining)
+            result['observations'].append(observed)
+            if response.get('error') or response.get('status') != poll['status']:
+                result['outcome'] = 'transport_failed'
+                break
+            actual = select(response.get('body'), poll['correlation']['response_path'])
+            matched = type(actual) is type(value) and actual == value
+            observed['correlation'] = {'path': poll['correlation']['response_path'], 'equals': value,
+                                       'actual': actual, 'status': 'passed' if matched else 'failed'}
+            if not matched:
+                result['outcome'] = 'correlation_mismatch'
+                break
+            state = select(response.get('body'), poll['state_path'])
+            observed['state'] = {'path': poll['state_path'], 'actual': state}
+            if state in poll['success']:
+                result['outcome'] = 'succeeded' if observed['status'] == 'passed' else 'business_failed'
+                result['status'] = observed['status']
+                break
+            observed['assertions'] = []  # Success assertions apply only at successful terminal state.
+            observed['status'] = 'failed'
+            if state in poll['failure']:
+                result['outcome'] = 'failed'
+                break
+            if state not in poll['pending']:
+                result['outcome'] = 'unknown_state'
+                break
+            observed['status'] = 'pending'
+            result['outcome'] = 'attempts_exhausted'
+            time.sleep(min(poll['interval'], max(0, deadline - time.monotonic())))
+        if result['outcome'] == 'attempts_exhausted' and time.monotonic() >= deadline:
+            result['outcome'] = 'deadline'
+    except (ValueError, KeyError, TypeError, IndexError) as exc:
+        result.update(outcome='invalid_observation', error=str(exc))
+    result['elapsed_seconds'] = time.monotonic() - started
+    return clean(sensitive(result))
+
+
 def run_http(check, root, candidate, clean):
     from verify import owned_file, relative
     service, cleanup = check['service'], check['cleanup']
@@ -282,6 +359,13 @@ def run_http(check, root, candidate, clean):
                     value = select(response.get('body'), path)
                     require(type(value) in (str, int) and re.fullmatch('[A-Za-z0-9_-]+', str(value)), 'Unsafe resource identifier')
                     captures[name] = str(value)
+            if 'poll' in request:
+                if observed['status'] == 'passed':
+                    observed['poll'] = poll_terminal(origin, request['poll'], response, service, clean)
+                    if observed['poll']['status'] != 'passed':
+                        observed['status'] = 'failed'
+                else:
+                    observed['poll'] = {'status': 'not_run', 'outcome': 'acceptance_failed', 'observations': []}
         identity()
         result['status'] = 'passed' if all(r['status'] == 'passed' for r in result['requests']) else 'failed'
     except (OSError, ValueError, KeyError, TypeError, IndexError) as exc:

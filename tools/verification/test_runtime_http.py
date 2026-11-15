@@ -118,6 +118,7 @@ class HTTPRuntimeTests(unittest.TestCase):
             _, result, _ = self.run_plan(root, plan)
             check = result['checks'][0]
             self.assertEqual(result['runtime_status'], 'unaccepted')
+            self.assertTrue(check['requests'], check)
             self.assertEqual(check['requests'][0]['attempts'], 1)
             self.assertEqual(check['requests'][0]['outcome'], 'unknown')
             self.assertEqual(check['requests'][1]['assertions'][0]['actual'], ['alpha'])
@@ -219,6 +220,7 @@ class HTTPRuntimeTests(unittest.TestCase):
                 _, result, _ = self.run_plan(root, plan)
                 self.assertLess(time.monotonic() - started, 8)
                 self.assertEqual(result['runtime_status'], 'unaccepted')
+                self.assertGreaterEqual(len(result['checks'][0]['requests']), 2, result['checks'][0])
                 request = result['checks'][0]['requests'][1]
                 self.assertEqual(request['http_status'], 302 if path == '/redirect' else None)
 
