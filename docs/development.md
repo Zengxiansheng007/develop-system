@@ -2,7 +2,7 @@
 
 This repository owns the develop-system dispatcher, navigation entry, and the 25 bundled engineering skills listed in `release-manifest.json`. Author source under `.agents/skills/`. Generated verification packages and release archives are ignored outputs, not another editable source tree.
 
-The manifest also ships the local implement-runtime extension and independent runtime-verify capability. Their initial CLI contract is in [runtime verification](../.agents/skills/runtime-verify/references/cli-contract.md); T01 scope and reuse provenance are recorded in [the implementation note](runtime-verification/t01.md). They do not yet establish managed runtime integration.
+The manifest also ships the local implement-runtime extension and independent runtime-verify capability. The [CLI contract](../.agents/skills/runtime-verify/references/cli-contract.md) and [HTTP lifecycle contract](../.agents/skills/runtime-verify/references/http-contract.md) define public plans. Scope and reuse provenance are recorded in [T01](runtime-verification/t01.md) and [T02](runtime-verification/t02.md). They do not yet establish managed runtime integration.
 
 ## Baseline and boundaries
 

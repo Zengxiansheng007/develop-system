@@ -26,7 +26,13 @@ def redactor(plan):
     policy = plan.get('redaction', {})
     names = policy.get('secret_env', [])
     require(isinstance(names, list) and all(isinstance(n, str) for n in names), 'Explicit secret environment names required')
-    values = [os.environ[n] for n in names if os.environ.get(n)]
+    http = any(isinstance(c, dict) and c.get('kind') == 'http' for c in plan.get('checks', []))
+    header_names = []
+    for check in plan.get('checks', []):
+        if isinstance(check, dict) and check.get('kind') == 'http':
+            for request in check.get('requests', []) + check.get('cleanup', {}).get('requests', []):
+                header_names.extend(request.get('headers_env', {}).values())
+    values = [os.environ[n] for n in names + header_names if isinstance(n, str) and os.environ.get(n)]
     def clean(value):
         if isinstance(value, str):
             for secret in sorted(values, key=len, reverse=True):
@@ -34,7 +40,11 @@ def redactor(plan):
             value = re.sub(r'(?i)(bearer\s+)[^\s\"\']+', r'\1[REDACTED]', value)
             return re.sub(r'(?i)((?:token|password|secret|api[_-]?key)\s*[=:]\s*)[^\s&\"\']+', r'\1[REDACTED]', value)
         if isinstance(value, dict):
-            return {clean(k): clean(v) for k, v in value.items()}
+            result = {clean(k): clean(v) for k, v in value.items()}
+            if http:
+                from http_runtime import sensitive
+                return sensitive(result)
+            return result
         if isinstance(value, list):
             return [clean(v) for v in value]
         return value
@@ -82,6 +92,11 @@ def validate_plan(plan):
         require(check['required'] or check.get('applicability_reason'), 'Optional check needs applicability reason')
         require(check.get('expectation_source'), 'Independent business expectation source required')
         require(check.get('behavior') in ('success', 'abnormal'), 'Behavior coverage missing')
+        if check.get('kind') == 'http':
+            from http_runtime import validate_http
+            validate_http(check, root, files)
+            continue
+        require(check.get('kind', 'cli') == 'cli', 'Unsupported runtime kind')
         cwd = relative(root, check['cwd'])
         require(cwd.is_dir(), 'Working directory missing')
         entry = relative(root, check['entry'])
@@ -153,6 +168,13 @@ def verify(plan, output):
         if deferred:
             results.append({'id': check['id'], 'required': check['required'], 'effective_required': False,
                             'status': 'not_run', 'execution_status': 'not_run', 'reason': 'explicit user deferral'})
+            continue
+        if check.get('kind') == 'http':
+            from http_runtime import run_http
+            result = run_http(check, root, candidate, clean)
+            name = f'http-{index}.json'
+            (output / name).write_text(json.dumps(clean(result), ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+            results.append({**result, 'record': name})
             continue
         cwd = relative(root, check['cwd'])
         try:
