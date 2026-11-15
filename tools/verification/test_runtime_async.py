@@ -194,7 +194,7 @@ class AsyncRuntimeTests(unittest.TestCase):
             plan, _ = self.correlated_secret_plan(root, 'token', 'id', short=True)
             _, result, _ = self.run_plan(root, plan)
             self.assertEqual(result['runtime_status'], 'passed', result)
-            self.assertEqual(result['schema_version'], 1)
+            self.assertEqual(result['schema_version'], 2)
             self.assertEqual(result['plan']['input_version'], 't03-test')
             check = result['checks'][0]
             self.assertEqual(check['identity'][0]['actual']['instance_id'], 'fixture-1')

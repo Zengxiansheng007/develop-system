@@ -95,16 +95,29 @@ class HTTPRuntimeTests(unittest.TestCase):
                     check['service']['identity']['instance_id'] = 'different-instance'
                 elif mode == 'dependency':
                     plan['dependencies'][0]['available'] = False
+                    service = root / 'service.py'
+                    service.write_text("from pathlib import Path\nPath('unexpected-launch').write_text('started')\n" +
+                                       service.read_text(encoding='utf-8'), encoding='utf-8')
                 elif mode == 'cleanup':
                     check['cleanup']['remove_files'].append('residual')
                 elif mode == 'foreign':
                     (root / 'data.db').write_text('foreign')
-                _, result, _ = self.run_plan(root, plan)
+                _, result, output = self.run_plan(root, plan)
                 self.assertEqual(result['runtime_status'], 'unaccepted')
-                if mode in ('dependency', 'foreign'):
+                if mode == 'dependency':
+                    self.assertEqual(len(result['checks']), 1)
+                    blocked = result['checks'][0]
+                    self.assertEqual(blocked['id'], 'AC-write')
+                    self.assertEqual(blocked['status'], 'blocked')
+                    self.assertEqual(blocked['execution_status'], 'not_run')
+                    self.assertTrue(blocked['effective_required'])
+                    self.assertNotIn('record', blocked)
+                    self.assertFalse(list(output.glob('http-*.json')))
+                    for name in ('unexpected-launch', 'data.db', 'port.json'):
+                        self.assertFalse((root / name).exists(), name)
+                elif mode == 'foreign':
                     self.assertFalse(result['checks'])
-                    if mode == 'foreign':
-                        self.assertEqual((root / 'data.db').read_text(), 'foreign')
+                    self.assertEqual((root / 'data.db').read_text(), 'foreign')
                 else:
                     self.assertEqual(result['checks'][0]['cleanup']['status'], 'failed' if mode == 'cleanup' else 'passed')
                     self.assertFalse((root / 'data.db').exists())
