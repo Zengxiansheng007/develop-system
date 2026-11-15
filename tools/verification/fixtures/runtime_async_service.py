@@ -54,7 +54,8 @@ class Handler(BaseHTTPRequestHandler):
         if correlation_fields:
             if mode.endswith('-acceptedarray'):
                 return self.reply(202, {'rows': [{correlation_fields[0]: correlation_value}], 'state': 'pending'})
-            return self.reply(202, {correlation_fields[0]: correlation_value, 'state': 'pending'})
+            return self.reply(201 if mode.endswith('-created') else 202,
+                              {correlation_fields[0]: correlation_value, 'state': 'pending'})
         self.reply(202, {'id': key, 'state': 'pending'})
 
     def do_GET(self):
@@ -82,6 +83,14 @@ class Handler(BaseHTTPRequestHandler):
         self.reply(200, {field: identifier,
                          'state': row[0], 'total': row[1], 'error': row[2],
                          'trace': self.headers.get('Authorization')})
+
+    def do_DELETE(self):
+        if not mode.endswith('-created') or self.path != '/jobs/' + correlation_value:
+            return self.reply(404, {'error': 'unknown owned job'})
+        with closing(sqlite3.connect(database)) as db:
+            db.execute('DELETE FROM jobs WHERE rowid=1')
+            db.commit()
+        self.reply(200, {'deleted': True, 'id': correlation_value})
 
 
 server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)

@@ -265,6 +265,45 @@ class AsyncRuntimeTests(unittest.TestCase):
                     for artifact in output.glob('*.json'):
                         self.assertNotIn(marker, artifact.read_text(encoding='utf-8'))
 
+    def captured_async_plan(self, root, accepted_field, response_field):
+        plan, marker = self.correlated_secret_plan(root, accepted_field, response_field)
+        check = plan['checks'][0]
+        check['service']['argv'][-1] += '-created'
+        check['requests'][0].update(status=201, capture={'job': [accepted_field]},
+                                    ownership_reason='POST 201 creates a fresh task-owned job row')
+        check['cleanup']['requests'] = [{'method': 'DELETE', 'path': '/jobs/{job}', 'status': 200, 'retry': 'none',
+            'assertions': [{'path': ['deleted'], 'equals': True}, {'path': ['id'], 'equals': marker},
+                           {'path': [], 'equals': {'deleted': True, 'id': marker}}]}]
+        return plan, marker
+
+    def test_sensitive_async_capture_is_blocked_without_cleanup_plan_leaks(self):
+        for accepted_field, response_field in (('token', 'token'), ('token', 'id'), ('id', 'token')):
+            with self.subTest(accepted=accepted_field, response=response_field), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                plan, marker = self.captured_async_plan(root, accepted_field, response_field)
+                _, result, output = self.run_plan(root, plan)
+                for artifact in output.glob('*.json'):
+                    self.assertNotIn(marker, artifact.read_text(encoding='utf-8'))
+                self.assertEqual(result['runtime_status'], 'unaccepted')
+                self.assertTrue(result['blockers'])
+                self.assertFalse(result['checks'])
+                self.assertFalse(list(output.glob('http-*.json')))
+                self.assertFalse((root / 'data.db').exists())
+                self.assertFalse((root / 'port.json').exists())
+
+    def test_nonsensitive_completed_create_still_polls_and_cleans_owned_job(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            plan, _ = self.captured_async_plan(root, 'id', 'id')
+            _, result, _ = self.run_plan(root, plan)
+            self.assertEqual(result['runtime_status'], 'passed', result)
+            check = result['checks'][0]
+            self.assertEqual(check['requests'][0]['http_status'], 201)
+            self.assertEqual(check['requests'][0]['poll']['outcome'], 'succeeded')
+            self.assertEqual(check['cleanup']['status'], 'passed')
+            self.assertEqual(check['cleanup']['requests'][0]['assertions'][0]['actual'], True)
+            self.assertFalse((root / 'data.db').exists())
+
 
 if __name__ == '__main__':
     unittest.main()

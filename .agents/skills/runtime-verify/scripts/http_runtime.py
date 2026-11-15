@@ -111,6 +111,7 @@ def validate_poll(request):
         require(isinstance(path, list) and path and all(type(p) in (str, int) for p in path), 'Explicit correlation/state selectors required')
     require(not sensitive_correlation(poll) or not negative_poll_selector(request),
             'Sensitive async correlation requires nonnegative array selectors')
+    require(not sensitive_async_capture(request), 'Sensitive async correlations cannot acquire cleanup captures')
     states = []
     for name in ('pending', 'success', 'failure'):
         values = poll[name]
@@ -219,6 +220,10 @@ def sensitive_correlation(poll):
     return isinstance(correlation, dict) and any(sensitive_selection(correlation.get(k)) for k in ('accepted_path', 'response_path'))
 
 
+def sensitive_async_capture(request):
+    return isinstance(request, dict) and bool(request.get('capture')) and sensitive_correlation(request.get('poll'))
+
+
 def negative_poll_selector(request):
     poll = request.get('poll')
     if not isinstance(poll, dict):
@@ -265,12 +270,19 @@ def sensitive(value):
         result = {k: '[REDACTED]' if secret_key(k) or (protected_assertion and k in ('actual', 'equals')) else sensitive(v) for k, v in value.items()}
         poll = value.get('poll')
         if sensitive_correlation(poll):
-            # Unsupported aliases must not leak through the rejected plan's echo.
-            redact_all = negative_poll_selector(value)
+            # Unsupported aliases/captures must not leak through the rejected plan's echo.
+            redact_all = negative_poll_selector(value) or sensitive_async_capture(value)
             for target, selector in ((result, poll['correlation'].get('accepted_path')),
                                      (result['poll'], poll['correlation'].get('response_path'))):
                 if isinstance(target.get('assertions'), list):
                     target['assertions'] = [mask_selection_record(a, selector, redact_all) for a in target['assertions']]
+        requests = value.get('requests')
+        cleanup = result.get('cleanup')
+        if isinstance(requests, list) and any(sensitive_async_capture(r) for r in requests) and isinstance(cleanup, dict):
+            if isinstance(cleanup.get('requests'), list):
+                for request in cleanup['requests']:
+                    if isinstance(request, dict) and isinstance(request.get('assertions'), list):
+                        request['assertions'] = [mask_selection_record(a, None, True) for a in request['assertions']]
         return result
     if isinstance(value, list):
         return [sensitive(v) for v in value]
