@@ -1,0 +1,12 @@
+{
+  "repository": "https://github.com/Zengxiansheng007/develop-system",
+  "origin": "local extension for issue 26; not an upstream skill copy",
+  "version": "1",
+  "license": "MIT",
+  "upstream_implement": {
+    "repository": "https://github.com/mattpocock/skills",
+    "commit": "4588b32ecab9ecc9fc8cc6b6c5e7d675b6004b0d",
+    "source_path": "skills/engineering/implement"
+  },
+  "boundary": "sibling directory outside implement replacement; one marked hook"
+}

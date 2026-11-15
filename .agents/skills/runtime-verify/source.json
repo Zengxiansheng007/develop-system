@@ -1,0 +1,21 @@
+{
+  "repository": "https://github.com/Zengxiansheng007/develop-system",
+  "origin": "local independent CLI business-evidence adapter for issue 26",
+  "version": "1",
+  "license": "MIT",
+  "reuse": [
+    {
+      "repository": "https://github.com/Zengxiansheng007/develop-system",
+      "commit": "a0a0ada94c3101f1663ea7288aa1ad630cdc9c2f",
+      "paths": [".agents/skills/develop-system/scripts/record_check.py", ".agents/skills/develop-system/scripts/check_binding.py"],
+      "license": "MIT",
+      "adaptation": "independent before-persist callback; reuse command runner and authorized source inventory"
+    },
+    {
+      "repository": "https://github.com/python/cpython",
+      "version": "v3.11.9",
+      "license": "PSF-2.0 and bundled license notices",
+      "adaptation": "installed standard library subprocess/pathlib/json/hashlib; no vendored implementation"
+    }
+  ]
+}

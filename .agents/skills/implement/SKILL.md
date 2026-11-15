@@ -11,6 +11,10 @@ description: "Implement a piece of work based on a spec or set of tickets."
 
 本技能负责单个任务或明确规格的实现及相关验证；无条件辅助义务以 [registry.json](../develop-system/registry.json) 本项 required_calls 为唯一声明，条件辅助工作依正文选择。测试/评审返回总路由后恢复 implement；范围内缺陷完成修复和重新验证后再结束。当前请求允许时按既有提交约定处理，没有仓库时报告产物，不虚构提交。
 
+<!-- BEGIN LOCAL IMPLEMENT RUNTIME v1 -->
+Before implementation, read [the local runtime extension](../implement-runtime/SKILL.md). Apply it during planning, candidate verification, final review, and completion; missing extension is a blocker.
+<!-- END LOCAL IMPLEMENT RUNTIME v1 -->
+
 Implement the work described by the user in the spec or tickets.
 
 Use /tdd where possible, at pre-agreed seams.

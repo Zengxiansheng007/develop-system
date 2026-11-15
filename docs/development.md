@@ -2,6 +2,8 @@
 
 This repository owns the develop-system dispatcher, navigation entry, and the 25 bundled engineering skills listed in `release-manifest.json`. Author source under `.agents/skills/`. Generated verification packages and release archives are ignored outputs, not another editable source tree.
 
+The manifest also ships the local implement-runtime extension and independent runtime-verify capability. Their initial CLI contract is in [runtime verification](../.agents/skills/runtime-verify/references/cli-contract.md); T01 scope and reuse provenance are recorded in [the implementation note](runtime-verification/t01.md). They do not yet establish managed runtime integration.
+
 ## Baseline and boundaries
 
 The import preserves the engineering source from the exact coedx-home commit and hashes in `docs/provenance/import-manifest.json`. Per-skill `source.json` and LICENSE retain upstream attribution. UI-Test product source, its Issues, active run state and historical evidence remain in their original locations. Future develop-system development belongs here; old runs remain bound to the version under which they started until an explicit migration.
