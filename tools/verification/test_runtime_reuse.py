@@ -167,6 +167,42 @@ class HTTPReuseTests(unittest.TestCase):
     existing = http_fixtures.HTTPRuntimeTests.existing
     send = http_fixtures.HTTPRuntimeTests.send
 
+    def test_requalification_omits_unselected_payloads_on_success_and_failure(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            plan = self.plan(root)
+            check = plan['checks'][0]
+            check['requalification'] = {'scope': 'actual readiness and immutable identity'}
+            check['cleanup']['external_owner'] = 'fixture owns created row'
+            with self.existing(root, plan) as (process, origin):
+                first = verify(plan, root / 'first')
+                original = (root / 'first/result.json').read_bytes()
+                self.assertEqual(first['runtime_status'], 'passed', (first['blockers'], (root / 'first/environment-0.json').read_text()))
+                for variant in ('reuse', 'wrong-identity', 'wrong-readiness'):
+                    with self.subTest(variant=variant):
+                        current = copy.deepcopy(plan)
+                        if variant == 'wrong-identity':
+                            current['checks'][0]['service']['identity']['instance_id'] = 'wrong-instance'
+                        elif variant == 'wrong-readiness':
+                            current['checks'][0]['service']['ready']['path'] = '/private-health'
+                        result = verify(current, root / variant, previous=root / 'first/result.json')
+                        if variant == 'reuse':
+                            self.assertEqual(result['runtime_status'], 'passed', result['blockers'])
+                            self.assertEqual(result['checks'][0]['execution_status'], 'reused')
+                            self.assertEqual(result['checks'][0]['original']['result_id'], first['result_id'])
+                        else:
+                            self.assertEqual(result['runtime_status'], 'unaccepted')
+                            self.assertEqual(result['checks'][0]['execution_status'], 'not_run')
+                        persisted = ''.join(p.read_text(encoding='utf-8') for p in (root / variant).glob('*.json'))
+                        for marker in ('unselected-identity-marker', 'synthetic-session-marker', 'unselected-readiness-marker'):
+                            self.assertNotIn(marker, persisted)
+                persisted = ''.join(p.read_text(encoding='utf-8') for p in (root / 'first').glob('*.json'))
+                self.assertNotIn('unselected-identity-marker', persisted)
+                self.assertNotIn('synthetic-session-marker', persisted)
+                self.assertEqual((root / 'first/result.json').read_bytes(), original)
+                self.assertEqual(self.send(origin, 'GET', '/items')['names'], ['alpha'])
+                self.assertIsNone(process.poll())
+
     def test_existing_service_requalifies_identity_without_replaying_business_write(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

@@ -49,7 +49,11 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self.path == '/identity':
             return self.reply(200, {'source_sha256': source, 'instance_id': instance,
-                                   'pid': os.getpid(), 'database': str(Path(database).resolve())})
+                                   'pid': os.getpid(), 'database': str(Path(database).resolve()),
+                                   'customer_notes': 'unselected-identity-marker',
+                                   'sessionToken': 'synthetic-session-marker'})
+        if self.path == '/private-health':
+            return self.reply(200, {'status': 'ready', 'customer_notes': 'unselected-readiness-marker'})
         if self.path == '/health':
             return self.reply(503 if mode == 'unready' else 200, {'status': 'ready'})
         with closing(sqlite3.connect(database)) as db:

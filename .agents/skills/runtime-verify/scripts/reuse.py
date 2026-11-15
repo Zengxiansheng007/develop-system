@@ -54,11 +54,16 @@ def observe(plan, check, output, index, clean):
         expected = {k: service['identity'][k] for k in ('instance_id', 'database', 'pid')}
         expected['source_sha256'] = next(f['sha256'] for f in snapshot(plan)['files'] if f['path'] == service['identity']['source'])
         body = identity.get('body')
-        passed = (ready.get('status') == service['ready']['status'] and ready.get('body') == service['ready']['json']
+        json_matches = ready.get('body') == service['ready']['json']
+        passed = (ready.get('status') == service['ready']['status'] and json_matches
                   and identity.get('status') == 200 and isinstance(body, dict)
                   and all(body.get(k) == v for k, v in expected.items()))
-        record = clean({'context': 'http-requalification', 'started_at': started, 'finished_at': now(),
-                        'origin': service['origin'], 'ready': ready, 'identity': identity, 'expected': expected,
+        record = clean({'context': 'http-requalification', 'schema_version': 2,
+                        'started_at': started, 'finished_at': now(), 'origin': service['origin'],
+                        'ready': {'status': ready.get('status'), 'json_matches': json_matches},
+                        'identity': {'status': identity.get('status'),
+                                     'fields': {k: body.get(k) for k in expected} if isinstance(body, dict) else {}},
+                        'expected': expected,
                         'status': 'passed' if passed else 'failed'})
         path = output / f'environment-{index}.json'
         path.write_text(json.dumps(record, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
@@ -135,15 +140,17 @@ def validate_reuse(item, plan, check, candidate):
     record = read_reference(observation['record'])
     if check.get('kind') == 'http':
         service = check['service']
-        body = record['identity'].get('body')
+        body = record.get('identity', {}).get('fields')
         expected = {k: service['identity'][k] for k in ('instance_id', 'database', 'pid')}
         expected['source_sha256'] = next(f['sha256'] for f in candidate['files'] if f['path'] == service['identity']['source'])
-        if (record['context'] != 'http-requalification' or record['status'] != 'passed'
+        if (type(record.get('schema_version')) is not int or record['schema_version'] != 2
+                or observation.get('status') != 'passed'
+                or record.get('context') != 'http-requalification' or record.get('status') != 'passed'
                 or record['origin'] != service['origin'] or record['expected'] != expected
-                or record['ready'].get('status') != service['ready']['status']
-                or record['ready'].get('body') != service['ready']['json']
-                or record['identity'].get('status') != 200 or not isinstance(body, dict)
-                or not all(body.get(k) == v for k, v in expected.items())):
+                or record.get('ready') != {'status': service['ready']['status'], 'json_matches': True}
+                or record.get('ready', {}).get('json_matches') is not True
+                or record.get('identity') != {'status': 200, 'fields': expected}
+                or not isinstance(body, dict)):
             raise ValueError('Current HTTP identity/readiness evidence missing')
         return original, record
     validate_record(record)
