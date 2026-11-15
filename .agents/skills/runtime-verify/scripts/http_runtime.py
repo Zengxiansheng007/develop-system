@@ -212,18 +212,53 @@ def sensitive_selection(path):
     return isinstance(path, list) and any(re.search(r'(?i)authorization|cookie|password|secret|token|api.?key', str(p)) for p in path)
 
 
+def sensitive_correlation(poll):
+    correlation = poll.get('correlation') if isinstance(poll, dict) else None
+    return isinstance(correlation, dict) and any(sensitive_selection(correlation.get(k)) for k in ('accepted_path', 'response_path'))
+
+
+def mask_selected(value, path, selector):
+    """Mask a known selected field, including inside ancestor object/array selections."""
+    if not isinstance(path, list) or not isinstance(selector, list):
+        return value
+    if path[:len(selector)] == selector:
+        return '[REDACTED]'
+    if selector[:len(path)] != path:
+        return value
+    key = selector[len(path)]
+    if isinstance(value, dict):
+        return {k: mask_selected(v, path + [key], selector) if k == key else v for k, v in value.items()}
+    if isinstance(value, list) and type(key) is int and -len(value) <= key < len(value):
+        index = key if key >= 0 else len(value) + key
+        return [mask_selected(v, path + [key], selector) if i == index else v for i, v in enumerate(value)]
+    return value
+
+
+def mask_selection_record(record, selector):
+    if not isinstance(record, dict):
+        return record
+    return {k: mask_selected(v, record.get('path'), selector) if k in ('actual', 'equals') else v for k, v in record.items()}
+
+
 def sensitive(value):
     if isinstance(value, dict):
         def secret_key(key):
             return re.fullmatch(r'(?i)authorization|(?:set-)?cookie|password|secret|(?:access_|refresh_)?token|api.?key', str(key))
         protected_assertion = sensitive_selection(value.get('path'))
-        return {k: '[REDACTED]' if secret_key(k) or (protected_assertion and k in ('actual', 'equals')) else sensitive(v) for k, v in value.items()}
+        result = {k: '[REDACTED]' if secret_key(k) or (protected_assertion and k in ('actual', 'equals')) else sensitive(v) for k, v in value.items()}
+        poll = value.get('poll')
+        if sensitive_correlation(poll):
+            for target, selector in ((result, poll['correlation'].get('accepted_path')),
+                                     (result['poll'], poll['correlation'].get('response_path'))):
+                if isinstance(target.get('assertions'), list):
+                    target['assertions'] = [mask_selection_record(a, selector) for a in target['assertions']]
+        return result
     if isinstance(value, list):
         return [sensitive(v) for v in value]
     return value
 
 
-def observe_request(origin, request, service, clean, timeout=None):
+def observe_request(origin, request, service, clean, timeout=None, protected_selector=None, display_path=None):
     response = request_once(origin, request, service, timeout)
     assertions = []
     for assertion in request['assertions']:
@@ -234,9 +269,10 @@ def observe_request(origin, request, service, clean, timeout=None):
             actual, passed = None, False
         if sensitive_selection(assertion['path']):
             actual = '[REDACTED]'
+        actual = mask_selected(actual, assertion['path'], protected_selector)
         assertions.append({'path': assertion['path'], 'actual': sensitive(actual), 'status': 'passed' if passed else 'failed'})
     passed = not response.get('error') and response.get('status') == request['status'] and all(a['status'] == 'passed' for a in assertions)
-    return clean({'method': request['method'], 'path': request['path'], 'attempts': 1, 'http_status': response.get('status'),
+    return clean({'method': request['method'], 'path': display_path if display_path is not None else request['path'], 'attempts': 1, 'http_status': response.get('status'),
                   'status': 'passed' if passed else 'failed', 'execution_status': 'executed' if 'status' in response else 'failed',
                   'outcome': 'unknown' if response.get('error') and request['method'] != 'GET' else 'observed',
                   'error': response.get('error'), 'assertions': assertions, 'response_policy': 'headers/raw body omitted; selected JSON assertions only'}), response
@@ -247,10 +283,11 @@ def poll_terminal(origin, poll, accepted, service, clean):
     result = {'status': 'failed', 'outcome': 'not_run', 'observations': [],
               'budget': {k: poll[k] for k in ('timeout', 'interval', 'max_attempts')}}
     started = time.monotonic()
+    protected = sensitive_correlation(poll)
     try:
         value = select(accepted.get('body'), poll['correlation']['accepted_path'])
         require(type(value) in (str, int) and re.fullmatch('[A-Za-z0-9_-]+', str(value)), 'Unsafe or missing accepted correlation')
-        result['accepted_correlation'] = {'path': poll['correlation']['accepted_path'], 'actual': value}
+        result['accepted_correlation'] = {'path': poll['correlation']['accepted_path'], 'actual': '[REDACTED]' if protected else value}
         request = {**poll, 'path': poll['path'].replace('{correlation}', str(value))}
         deadline = started + poll['timeout']
         for _ in range(poll['max_attempts']):
@@ -258,20 +295,24 @@ def poll_terminal(origin, poll, accepted, service, clean):
             if remaining <= 0:
                 result['outcome'] = 'deadline'
                 break
-            observed, response = observe_request(origin, request, service, clean, remaining)
+            observed, response = observe_request(origin, request, service, clean, remaining,
+                protected_selector=poll['correlation']['response_path'] if protected else None,
+                display_path=poll['path'] if protected else None)
             result['observations'].append(observed)
             if response.get('error') or response.get('status') != poll['status']:
                 result['outcome'] = 'transport_failed'
                 break
             actual = select(response.get('body'), poll['correlation']['response_path'])
             matched = type(actual) is type(value) and actual == value
-            observed['correlation'] = {'path': poll['correlation']['response_path'], 'equals': value,
-                                       'actual': actual, 'status': 'passed' if matched else 'failed'}
+            observed['correlation'] = {'path': poll['correlation']['response_path'], 'equals': '[REDACTED]' if protected else value,
+                                       'actual': '[REDACTED]' if protected else actual, 'status': 'passed' if matched else 'failed'}
             if not matched:
                 result['outcome'] = 'correlation_mismatch'
                 break
             state = select(response.get('body'), poll['state_path'])
             observed['state'] = {'path': poll['state_path'], 'actual': state}
+            if protected:
+                observed['state'] = mask_selection_record(observed['state'], poll['correlation']['response_path'])
             if state in poll['success']:
                 result['outcome'] = 'succeeded' if observed['status'] == 'passed' else 'business_failed'
                 result['status'] = observed['status']
@@ -351,7 +392,9 @@ def run_http(check, root, candidate, clean):
         result['readiness'] = {'status': 'passed', 'probes': probes}
         identity()
         for request in check['requests']:
-            observed, response = observe_request(origin, request, service, clean)
+            poll = request.get('poll')
+            observed, response = observe_request(origin, request, service, clean,
+                protected_selector=poll['correlation']['accepted_path'] if sensitive_correlation(poll) else None)
             result['requests'].append(observed)
             result['execution_status'] = observed['execution_status']
             if create_success(request, response.get('status')) and not response.get('error'):

@@ -12,6 +12,8 @@ import time
 
 database, discovery, instance, mode = sys.argv[1:]
 source = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+correlation_fields = mode.split('-') if mode.startswith(('token-', 'id-token')) else None
+correlation_value = '1' if mode.endswith('-short') else 'synthetic-job-token-28'
 with closing(sqlite3.connect(database)) as db:
     db.execute('CREATE TABLE jobs(state TEXT, total INTEGER, error TEXT)')
     db.commit()
@@ -48,6 +50,8 @@ class Handler(BaseHTTPRequestHandler):
             time.sleep(8)
         if mode == 'missing_id':
             return self.reply(202, {'state': 'pending'})
+        if correlation_fields:
+            return self.reply(202, {correlation_fields[0]: correlation_value, 'state': 'pending'})
         self.reply(202, {'id': key, 'state': 'pending'})
 
     def do_GET(self):
@@ -59,11 +63,18 @@ class Handler(BaseHTTPRequestHandler):
         with closing(sqlite3.connect(database)) as db:
             if self.path == '/jobs':
                 return self.reply(200, {'count': db.execute('SELECT COUNT(*) FROM jobs').fetchone()[0]})
-            key = int(self.path.rsplit('/', 1)[1])
+            if correlation_fields:
+                if self.path != '/jobs/' + correlation_value:
+                    return self.reply(404, {'error': 'wrong correlation path'})
+                key = 1
+            else:
+                key = int(self.path.rsplit('/', 1)[1])
             row = db.execute('SELECT state,total,error FROM jobs WHERE rowid=?', (key,)).fetchone()
         if mode == 'slow':
             time.sleep(8)
-        self.reply(200, {'id': key + 1 if mode == 'wrong_job' else key,
+        field = correlation_fields[1] if correlation_fields else 'id'
+        identifier = correlation_value if correlation_fields else key + 1 if mode == 'wrong_job' else key
+        self.reply(200, {field: identifier,
                          'state': row[0], 'total': row[1], 'error': row[2],
                          'trace': self.headers.get('Authorization')})
 

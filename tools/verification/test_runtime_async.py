@@ -156,6 +156,59 @@ class AsyncRuntimeTests(unittest.TestCase):
                 self.assertTrue(result['blockers'])
                 self.assertFalse((root / 'data.db').exists())
 
+    def correlated_secret_plan(self, root, accepted_field, response_field, short=False):
+        mode = accepted_field + '-' + response_field + ('-short' if short else '')
+        plan = self.plan(root, mode)
+        marker = '1' if short else 'synthetic-job-token-28'
+        request = plan['checks'][0]['requests'][0]
+        poll = request['poll']
+        poll['correlation'] = {'accepted_path': [accepted_field], 'response_path': [response_field]}
+        request['assertions'].extend([
+            {'path': [accepted_field], 'equals': marker},
+            {'path': [], 'equals': {accepted_field: marker, 'state': 'pending'}}])
+        poll['assertions'].extend([
+            {'path': [response_field], 'equals': marker},
+            {'path': [], 'equals': {response_field: marker, 'state': 'succeeded', 'total': 42, 'error': None, 'trace': None}}])
+        return plan, marker
+
+    def test_sensitive_correlation_propagates_across_selectors_paths_and_assertions(self):
+        for accepted_field, response_field in (('token', 'token'), ('token', 'id'), ('id', 'token')):
+            with self.subTest(accepted=accepted_field, response=response_field), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                plan, marker = self.correlated_secret_plan(root, accepted_field, response_field)
+                _, result, output = self.run_plan(root, plan)
+                self.assertEqual(result['runtime_status'], 'passed', result)
+                for artifact in output.glob('*.json'):
+                    self.assertNotIn(marker, artifact.read_text(encoding='utf-8'))
+                request = result['checks'][0]['requests'][0]
+                self.assertEqual(request['poll']['accepted_correlation']['actual'], '[REDACTED]')
+                for observed in request['poll']['observations']:
+                    self.assertEqual(observed['path'], '/jobs/{correlation}')
+                    self.assertEqual(observed['correlation']['actual'], '[REDACTED]')
+                    self.assertEqual(observed['correlation']['equals'], '[REDACTED]')
+                self.assertFalse((root / 'data.db').exists())
+
+    def test_short_sensitive_correlation_does_not_rewrite_structural_metadata(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            plan, _ = self.correlated_secret_plan(root, 'token', 'id', short=True)
+            _, result, _ = self.run_plan(root, plan)
+            self.assertEqual(result['runtime_status'], 'passed', result)
+            self.assertEqual(result['schema_version'], 1)
+            self.assertEqual(result['plan']['input_version'], 't03-test')
+            check = result['checks'][0]
+            self.assertEqual(check['identity'][0]['actual']['instance_id'], 'fixture-1')
+            self.assertEqual(check['id'], 'AC-write')
+            request = check['requests'][0]
+            self.assertEqual(request['attempts'], 1)
+            poll = request['poll']
+            self.assertEqual(poll['accepted_correlation']['actual'], '[REDACTED]')
+            self.assertEqual(poll['observations'][-1]['correlation']['actual'], '[REDACTED]')
+            self.assertEqual(poll['observations'][-1]['assertions'][0]['actual'], 42)
+            self.assertEqual(poll['observations'][-1]['assertions'][1]['actual'], '[REDACTED]')
+            self.assertEqual(poll['observations'][-1]['assertions'][2]['actual']['id'], '[REDACTED]')
+            self.assertEqual(result['plan']['checks'][0]['requests'][0]['poll']['assertions'][1]['equals'], '[REDACTED]')
+
 
 if __name__ == '__main__':
     unittest.main()
