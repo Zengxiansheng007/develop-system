@@ -41,6 +41,8 @@ def validate_execution_scope(plan, binding):
     """Target process locations retain the original dispatched execution authority."""
     root = Path(plan['root']).resolve()
     for check in plan['checks']:
+        if check.get('requalification') and check.get('kind') != 'http':
+            validate_binding(binding, relative(root, check['requalification']['cwd']))
         if check.get('kind') == 'http':
             service = check['service']
             if service['mode'] != 'owned':
@@ -76,7 +78,7 @@ def qualify(state, frame, evidence):
     file_evidence(evidence)
     envelope = json.loads(Path(evidence['path']).read_text(encoding='utf-8'))
     version = frame.get('runtime_evidence_version', 1)
-    require(envelope.get('version') == version and version in (1, 2)
+    require(envelope.get('version') == version and version in (1, 2, 3)
             and envelope.get('context') == 'managed-professional', 'Dispatched professional envelope version required')
     expected = {k: frame[k] for k in ('frame_id', 'parent_frame_id', 'input_version', 'skill_id')}
     expected['run_id'] = state['run_id']
@@ -88,9 +90,9 @@ def qualify(state, frame, evidence):
     require(envelope.get('producer') == producer_snapshot(frame['skill_path']), 'Runtime producer changed')
     result_ref = file_evidence(envelope['result'])
     result = json.loads(Path(result_ref['path']).read_text(encoding='utf-8'))
-    require(result.get('context') == 'independent' and result.get('schema_version') == 1, 'Original runtime artifact required')
+    require(result.get('context') == 'independent' and result.get('schema_version') in (1, 2), 'Original runtime artifact required')
     window = None
-    if version == 2:
+    if version >= 2:
         window = (timestamp(envelope['execution_window']['started_at']), timestamp(envelope['execution_window']['finished_at']))
         require(window[0] <= timestamp(result['created_at']) <= window[1], 'Runtime result lies outside invocation interval')
     plan = result['plan']
@@ -128,11 +130,37 @@ def qualify(state, frame, evidence):
         check = results.get(check_id, {})
         if check_id in deferred:
             return check.get('status') == 'not_run' and check.get('effective_required') is False
+        reused = check.get('execution_status') == 'reused'
+        check_window = window
+        if reused:
+            require(version == 3, 'Reuse requires professional envelope v3')
+            import sys
+            scripts = str(Path(frame['skill_path']).parent / 'scripts')
+            if scripts not in sys.path:
+                sys.path.insert(0, scripts)
+            from reuse import validate_reuse
+            original_ref = file_evidence(envelope['original_envelopes'][check_id])
+            original_envelope = json.loads(Path(original_ref['path']).read_text(encoding='utf-8'))
+            identity = original_envelope['identity']
+            source = next((f for f in state['frames'] if f['frame_id'] == identity['frame_id']), None)
+            require(source and source['frame_id'] != frame['frame_id']
+                    and source.get('runtime_evidence') == original_ref
+                    and identity['run_id'] == state['run_id']
+                    and original_envelope['binding']['worktree'] == binding['worktree']
+                    and original_envelope['result'] == check['original']['result'],
+                    'Reuse must reference admitted original same-run execution')
+            check, probe = validate_reuse(check, plan, planned[check_id], candidate)
+            require(window[0] <= timestamp(probe['started_at']) <= timestamp(probe['finished_at']) <= window[1],
+                    'Environment observation lies outside current invocation')
+            check_window = (timestamp(original_envelope['execution_window']['started_at']),
+                            timestamp(original_envelope['execution_window']['finished_at']))
+            record = json.loads(Path(results[check_id]['original']['record']['path']).read_text(encoding='utf-8'))
         if check.get('status') != 'passed' or not check.get('record'):
             return False
-        record = json.loads(Path(references[check['record']]['path']).read_text(encoding='utf-8'))
+        if not reused:
+            record = json.loads(Path(references[check['record']]['path']).read_text(encoding='utf-8'))
         if planned[check_id].get('kind') == 'http':
-            if {k: v for k, v in check.items() if k != 'record'} != record:
+            if {k: v for k, v in check.items() if k not in ('record', 'record_reference', 'premises', 'environment_observation')} != record:
                 return False
             if not check.get('identity') or not check.get('requests') or check.get('readiness', {}).get('status') != 'passed':
                 return False
@@ -155,8 +183,8 @@ def qualify(state, frame, evidence):
             require(record.get('command') == planned[check_id]['argv']
                     and record.get('execution_command') == planned[check_id]['argv']
                     and record.get('cwd') == str(cwd), 'CLI receipt operation differs from planned entry')
-            if window:
-                require(window[0] <= timestamp(record['started_at']) <= timestamp(record['finished_at']) <= window[1],
+            if check_window:
+                require(check_window[0] <= timestamp(record['started_at']) <= timestamp(record['finished_at']) <= check_window[1],
                         'CLI receipt lies outside invocation interval')
             if (record.get('context') != 'independent' or record.get('exit_code') != planned[check_id]['expected_exit']
                     or record.get('error') is not None or check.get('execution_status') != 'executed'

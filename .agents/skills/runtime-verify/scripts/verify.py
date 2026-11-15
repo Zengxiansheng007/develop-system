@@ -86,7 +86,6 @@ def validate_plan(plan):
     for dep in plan['dependencies']:
         require(dep.get('mode') in ('real', 'simulated') and dep.get('evidence'), 'Dependency mode/evidence missing')
         require(type(dep.get('required')) is bool and type(dep.get('available')) is bool, 'Dependency applicability missing')
-        require(not dep['required'] or (dep['available'] and dep['mode'] == 'real'), 'Required real dependency unavailable')
     ids = set()
     for check in plan['checks']:
         require(check.get('id') and check['id'] not in ids, 'Unique acceptance id required')
@@ -106,7 +105,7 @@ def validate_plan(plan):
         require(check['entry'] in files and entry.is_file(), 'Entry must be in candidate')
         argv = check['argv']
         require(isinstance(argv, list) and argv and all(isinstance(v, str) and v for v in argv), 'Nonempty argv required')
-        require(Path(argv[0]).is_absolute() and Path(argv[0]).is_file(), 'Resolve executable before verification')
+        require(Path(argv[0]).is_absolute(), 'Resolve executable before verification')
         require(Path(argv[0]).suffix.lower() not in ('.cmd', '.bat'), 'Batch shell entry needs a dedicated adapter')
         position = check['entry_arg']
         require(type(position) is int and 0 <= position < len(argv), 'Entry argv position required')
@@ -154,7 +153,8 @@ def snapshot(plan):
             'candidate_id': digest(files)}
 
 
-def verify(plan, output):
+def verify(plan, output, previous=None):
+    from reuse import premises, observe, reusable, reference
     output = Path(output).resolve()
     output.mkdir(parents=True, exist_ok=False)
     candidate = None
@@ -172,12 +172,33 @@ def verify(plan, output):
             results.append({'id': check['id'], 'required': check['required'], 'effective_required': False,
                             'status': 'not_run', 'execution_status': 'not_run', 'reason': 'explicit user deferral'})
             continue
+        try:
+            require(all(not d['required'] or (d['available'] and d['mode'] == 'real') for d in plan['dependencies']),
+                    'Required real dependency unavailable')
+            observation = observe(plan, check, output, index, clean)
+            current_premises = premises(plan, check, candidate)
+            origin = reusable(previous, plan, check, candidate)
+            if observation and observation['status'] != 'passed':
+                raise ValueError('Environment requalification failed: ' + check['id'])
+            if origin:
+                old = json.loads(Path(origin['result']['path']).read_text(encoding='utf-8'))
+                original = next(c for c in old['checks'] if c['id'] == check['id'])
+                results.append({**{k: v for k, v in original.items() if k not in ('record', 'record_reference')},
+                    'execution_status': 'reused', 'original': origin, 'premises': current_premises,
+                    'environment_observation': observation})
+                continue
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            blockers.append(str(exc))
+            results.append({'id': check['id'], 'required': check['required'], 'effective_required': check['required'],
+                            'status': 'blocked', 'execution_status': 'not_run', 'error': str(exc)})
+            continue
         if check.get('kind') == 'http':
             from http_runtime import run_http
             result = run_http(check, root, candidate, clean)
             name = f'http-{index}.json'
             (output / name).write_text(json.dumps(clean(result), ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
-            results.append({**result, 'record': name})
+            results.append({**result, 'record': name, 'record_reference': reference(output / name),
+                            'premises': current_premises, 'environment_observation': observation})
             continue
         cwd = relative(root, check['cwd'])
         try:
@@ -229,6 +250,8 @@ def verify(plan, output):
                         'execution_status': 'executed' if record['exit_code'] is not None else 'failed',
                         'exit_code': record['exit_code'], 'error': record['error'],
                         'record': name, 'assertions': assertions,
+                        'record_reference': reference(output / name) if (output / name).exists() else None,
+                        'premises': current_premises, 'environment_observation': observation,
                         'cleanup': {'status': 'failed' if cleanup_errors else 'passed', 'errors': cleanup_errors}})
     candidate_after = None
     if candidate:
@@ -241,7 +264,7 @@ def verify(plan, output):
     status = 'unaccepted'
     if not blockers and results and all(r['status'] == 'passed' for r in results if r['effective_required']):
         status = 'passed_with_adjustment' if plan['scope_adjustments'] else 'passed'
-    result = {'schema_version': 1, 'context': 'independent', 'result_id': uuid.uuid4().hex,
+    result = {'schema_version': 2, 'context': 'independent', 'result_id': uuid.uuid4().hex,
               'created_at': now(), 'plan': plan, 'candidate': candidate, 'candidate_after': candidate_after,
               'checks': results, 'blockers': blockers, 'runtime_status': status}
     result = clean(result)
@@ -253,8 +276,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--plan', required=True)
     parser.add_argument('--output', required=True)
+    parser.add_argument('--previous')
     args = parser.parse_args()
-    result = verify(json.loads(Path(args.plan).read_text(encoding='utf-8')), args.output)
+    result = verify(json.loads(Path(args.plan).read_text(encoding='utf-8')), args.output, args.previous)
     print(json.dumps({'result': str(Path(args.output).resolve() / 'result.json'), 'runtime_status': result['runtime_status']}))
     return 0 if result['runtime_status'] in ('passed', 'passed_with_adjustment') else 1
 

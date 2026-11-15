@@ -13,7 +13,7 @@ from verify import verify
 from record_check import now
 
 
-def execute(store, frame_id, plan, output):
+def execute(store, frame_id, plan, output, previous=None):
     state = store.read()
     require_current(state)
     frame = next(f for f in state['frames'] if f['frame_id'] == frame_id)
@@ -28,11 +28,27 @@ def execute(store, frame_id, plan, output):
     source_inventory(Path(plan['root']), binding['source_ranges'], plan['candidate'])
     require(plan['input_version'] == frame['input_version'] and plan['scope_adjustments'] == frame['runtime_contract']['scope_adjustments'], 'Wrong input or scope')
     producer = producer_snapshot(frame['skill_path'])
+    original_envelope = None
+    previous_result = None
+    if previous:
+        original_envelope = file_evidence(str(previous))
+        old = json.loads(Path(previous).read_text(encoding='utf-8'))
+        source = next((f for f in state['frames'] if f['frame_id'] == old['identity']['frame_id']), None)
+        require(source and source.get('runtime_evidence') == original_envelope
+                and old['identity']['run_id'] == state['run_id']
+                and old['binding']['worktree'] == binding['worktree'], 'Previously admitted same-run original required')
+        previous_result = old['result']['path']
     started_at = now()
-    result = verify(plan, output)
+    result = verify(plan, output, previous_result)
     finished_at = now()
     output = Path(output).resolve()
-    envelope = {'version': 2, 'context': 'managed-professional',
+    original_envelopes = {}
+    for item in result['checks']:
+        if item.get('execution_status') == 'reused':
+            original_envelopes[item['id']] = (original_envelope if item['original']['result'] == old['result']
+                else old['original_envelopes'][item['id']])
+    envelope = {'version': frame['runtime_evidence_version'], 'context': 'managed-professional',
+        'original_envelopes': original_envelopes,
         'execution_window': {'started_at': started_at, 'finished_at': finished_at},
         'identity': {**{k: frame[k] for k in ('frame_id', 'parent_frame_id', 'input_version', 'skill_id')}, 'run_id': state['run_id']},
         'binding': binding, 'contract': frame['runtime_contract'], 'producer': producer,
@@ -58,9 +74,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ('project', 'run', 'frame', 'plan', 'output'):
         parser.add_argument('--' + name, required=True)
+    parser.add_argument('--previous')
     args = parser.parse_args()
     event = execute(RunStore(args.project, args.run), args.frame,
-                    json.loads(Path(args.plan).read_text(encoding='utf-8')), args.output)
+                    json.loads(Path(args.plan).read_text(encoding='utf-8')), args.output, args.previous)
     print(json.dumps({'return': str(Path(args.output).resolve() / 'return.json'), 'blockers': event['blockers']}))
     return 1 if event['blockers'] else 0
 

@@ -25,8 +25,8 @@ class RuntimeManagedTests(unittest.TestCase):
         state = self.store.dispatch(state['revision'], 'implement', 'v1', 'a')
         parent = state['frames'][-1]
         self.assertEqual({d['skill_id'] for d in parent['completion_obligations']}, {'code-review', 'runtime-verify'})
-        state = self.store.dispatch(state['revision'], 'code-review', 'v1', parent_frame_id=parent['frame_id'])
-        state = self.store.receive(state['revision'], self.event(state['frames'][-1]))
+        with self.assertRaises(ValueError):
+            self.store.dispatch(state['revision'], 'code-review', 'v1', parent_frame_id=parent['frame_id'])
         before = self.store.path.read_bytes()
         with self.assertRaises(ValueError):
             self.store.receive(state['revision'], self.event(parent))

@@ -2,7 +2,7 @@
 
 This opt-in contract applies to new task steps. Old schema-v4 runs, protocol-v1 returns and check-record semantics remain unchanged. No migration or evidence relabeling occurs. Runtime evidence is a professional artifact; the dispatcher checks identity, coverage, currentness and internal consistency. The specialist owns the independent business expectations and actual acceptance judgment. This is neither arbitrary-language loaded-source observation nor authenticated user consent.
 
-Task contract v1 and professional envelope versions are separate. New runtime dispatches freeze `runtime_evidence_version: 2`; the adapter emits envelope v2 with the actual invocation start/end interval. Original frames without that declaration retain envelope v1 semantics and acquire no interval claim. Use their matching producer/runtime or an explicitly authorized transition; this adapter does not migrate them. Existing producer-currentness checks still apply. A new v2 frame cannot accept a downgraded v1 envelope.
+Task contract v1 and professional envelope versions are separate. New runtime dispatches freeze `runtime_evidence_version: 3`; v3 retains v2's actual invocation interval and adds explicit direct-original reuse references under [the reuse contract](reuse-contract.md). Original frames retain their frozen v1/v2 semantics; frames without a declaration retain v1. Use their matching producer/runtime or an explicitly authorized transition; this adapter does not migrate them. Existing producer-currentness checks still apply. A new v3 frame cannot accept a downgraded envelope.
 
 Use the real selected implement entry and its local extension. Create the step with `runtime_contract` before dispatch:
 

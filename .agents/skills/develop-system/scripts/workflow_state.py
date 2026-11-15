@@ -247,6 +247,10 @@ def frame_is_current(state, frame, visiting=()):
     if frame["frame_id"] in visiting or not all(evidence_is_current(e) for e in frame_evidence(frame)):
         return False
     try:
+        for source_id in frame.get('runtime_review_sources', []):
+            source = next((f for f in state['frames'] if f['frame_id'] == source_id), None)
+            if not source or source['status'] != 'completed' or not frame_is_current(state, source, (*visiting, frame['frame_id'])):
+                return False
         if frame.get('runtime_evidence'):
             from runtime_contract import qualify
             qualify(state, frame, frame['runtime_evidence'])
@@ -938,12 +942,22 @@ class RunStore:
                                 "completion_obligations": obligations,
                                 "inputs": captured, "artifacts": [], "needs_assessment": False})
         frame = state["frames"][-1]
+        if runtime_contract and skill_id == 'implement':
+            frame['runtime_review_version'] = 1
+        if (runtime_contract and skill_id == 'code-review' and parent_frame_id
+                and parent.get('runtime_review_version') == 1):
+            sources = [f for f in state['frames'] if f.get('parent_frame_id') == parent_frame_id
+                       and f['skill_id'] == 'runtime-verify' and f['status'] == 'completed'
+                       and f.get('runtime_evidence') and frame_is_current(state, f)]
+            if not sources:
+                raise ValueError('Final review requires current runtime evidence first')
+            frame['runtime_review_sources'] = [sources[-1]['frame_id']]
         if runtime_contract and skill_id in {'implement', 'runtime-verify'}:
             frame['runtime_contract'] = runtime_contract
         frame["worktree_binding"] = (bind_worktree(self.project, state["run_id"], frame["frame_id"],
             input_version, worktree) if worktree is not None else None)
         if runtime_contract and skill_id == 'runtime-verify':
-            frame['runtime_evidence_version'] = 2
+            frame['runtime_evidence_version'] = 3
             original = parent.get('worktree_binding')
             current = frame['worktree_binding']
             if not original or not current or parent['input_version'] != input_version or any(
