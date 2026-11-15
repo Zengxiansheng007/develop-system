@@ -10,6 +10,7 @@ from workflow_state import RunStore, file_evidence, require_current
 from runtime_contract import producer_snapshot, qualify, require, validate_execution_scope
 from check_binding import source_inventory, validate_worktree
 from verify import verify
+from record_check import now
 
 
 def execute(store, frame_id, plan, output):
@@ -27,9 +28,12 @@ def execute(store, frame_id, plan, output):
     source_inventory(Path(plan['root']), binding['source_ranges'], plan['candidate'])
     require(plan['input_version'] == frame['input_version'] and plan['scope_adjustments'] == frame['runtime_contract']['scope_adjustments'], 'Wrong input or scope')
     producer = producer_snapshot(frame['skill_path'])
+    started_at = now()
     result = verify(plan, output)
+    finished_at = now()
     output = Path(output).resolve()
-    envelope = {'version': 1, 'context': 'managed-professional',
+    envelope = {'version': 2, 'context': 'managed-professional',
+        'execution_window': {'started_at': started_at, 'finished_at': finished_at},
         'identity': {**{k: frame[k] for k in ('frame_id', 'parent_frame_id', 'input_version', 'skill_id')}, 'run_id': state['run_id']},
         'binding': binding, 'contract': frame['runtime_contract'], 'producer': producer,
         'result': file_evidence(str(output / 'result.json')),

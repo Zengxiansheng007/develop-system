@@ -943,6 +943,7 @@ class RunStore:
         frame["worktree_binding"] = (bind_worktree(self.project, state["run_id"], frame["frame_id"],
             input_version, worktree) if worktree is not None else None)
         if runtime_contract and skill_id == 'runtime-verify':
+            frame['runtime_evidence_version'] = 2
             original = parent.get('worktree_binding')
             current = frame['worktree_binding']
             if not original or not current or parent['input_version'] != input_version or any(

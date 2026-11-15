@@ -6,6 +6,8 @@ import json
 import shutil
 import sys
 import uuid
+import os
+from datetime import datetime, timedelta
 from pathlib import Path
 import test_worktree_checks as worktrees
 from workflow_state import RunStore, SKILL_ROOT
@@ -65,6 +67,93 @@ class RuntimeEvidenceTests(unittest.TestCase):
     def run_runtime(self):
         return execute(self.store, self.frame['frame_id'], self.plan, self.root / uuid.uuid4().hex)
 
+    def refresh_runtime_event(self, event, envelope):
+        from workflow_state import file_evidence
+        path = Path(event['runtime_evidence']['path'])
+        path.write_text(json.dumps(envelope), encoding='utf-8')
+        evidence = file_evidence(str(path))
+        event['runtime_evidence'] = evidence
+        event['artifacts'] = [evidence]
+        event['acceptance_checks'][0]['evidence'] = [evidence]
+
+    def test_unrelated_executed_receipt_cannot_complete_planned_entry(self):
+        from record_check import run_record
+        from workflow_state import file_evidence
+        self.prepare()
+        event = self.run_runtime()
+        envelope = json.loads(Path(event['runtime_evidence']['path']).read_text(encoding='utf-8'))
+        receipt = Path(envelope['records'][0]['path'])
+        unrelated = self.root / 'unrelated.json'
+        run_record([self.plan['checks'][0]['argv'][0], '-e', "console.log('correct')"], self.project, unrelated, 10)
+        receipt.write_bytes(unrelated.read_bytes())
+        envelope['records'][0] = dict(file_evidence(str(receipt)), name=envelope['records'][0]['name'])
+        self.refresh_runtime_event(event, envelope)
+        before = self.store.path.read_bytes()
+        with self.assertRaises(ValueError):
+            self.store.receive(self.state['revision'], event)
+        self.assertEqual(before, self.store.path.read_bytes())
+        with self.assertRaises(ValueError):
+            self.store.complete(self.state['revision'], [{'id': '1', 'source_frame_id': self.frame['frame_id']}])
+        self.assertEqual(before, self.store.path.read_bytes())
+
+    def test_receipt_operation_dimensions_and_version_cannot_be_swapped(self):
+        from workflow_state import file_evidence
+        self.prepare()
+        event = self.run_runtime()
+        envelope_path = Path(event['runtime_evidence']['path'])
+        original_envelope = json.loads(envelope_path.read_text(encoding='utf-8'))
+        receipt = Path(original_envelope['records'][0]['path'])
+        original_record = json.loads(receipt.read_text(encoding='utf-8'))
+        result_path = Path(original_envelope['result']['path'])
+        original_result = json.loads(result_path.read_text(encoding='utf-8'))
+        before = self.store.path.read_bytes()
+        for variant in ('command', 'execution_command', 'cwd', 'entry', 'time', 'missing-record', 'version'):
+            with self.subTest(variant=variant):
+                changed = copy.deepcopy(event)
+                envelope = copy.deepcopy(original_envelope)
+                record = copy.deepcopy(original_record)
+                result = copy.deepcopy(original_result)
+                if variant in ('command', 'execution_command'):
+                    record[variant] = [record['command'][0], '-e', "console.log('correct')"]
+                elif variant == 'cwd':
+                    record['cwd'] = str(self.project)
+                elif variant == 'entry':
+                    result['plan']['checks'][0]['entry'] = 'src/value.py'
+                elif variant == 'time':
+                    for field in ('started_at', 'finished_at'):
+                        record[field] = (datetime.fromisoformat(record[field]) - timedelta(days=1)).isoformat()
+                elif variant == 'version':
+                    envelope['version'] = 1
+                receipt.write_text(json.dumps(record), encoding='utf-8')
+                result_path.write_text(json.dumps(result), encoding='utf-8')
+                envelope['result'] = file_evidence(str(result_path))
+                envelope['records'] = [] if variant == 'missing-record' else [dict(file_evidence(str(receipt)), name=envelope['records'][0]['name'])]
+                self.refresh_runtime_event(changed, envelope)
+                with self.assertRaises(ValueError):
+                    self.store.receive(self.state['revision'], changed)
+                self.assertEqual(before, self.store.path.read_bytes())
+
+    def test_masked_cli_argv_and_omitted_output_retain_operation_linkage(self):
+        self.prepare()
+        variable, value = 'DS_TEST_RUNTIME_SECRET', 'SYNTHETIC_RUNTIME_VALUE'
+        previous = os.environ.get(variable)
+        os.environ[variable] = value
+        try:
+            self.plan['redaction'] = {'secret_env': [variable], 'omit_output': True}
+            self.plan['checks'][0]['argv'].append('password=' + value)
+            event = self.run_runtime()
+            envelope = json.loads(Path(event['runtime_evidence']['path']).read_text(encoding='utf-8'))
+            result_text = Path(envelope['result']['path']).read_text(encoding='utf-8')
+            receipt_text = Path(envelope['records'][0]['path']).read_text(encoding='utf-8')
+            self.assertNotIn(value, result_text + receipt_text)
+            self.assertEqual(json.loads(receipt_text)['stdout'], '[omitted]')
+            self.finish_professionals(event)
+            self.assertEqual(self.store.complete(self.state['revision'], [{'id': '1', 'source_frame_id': self.frame['frame_id']}])['status'], 'completed')
+        finally:
+            if previous is None:
+                os.environ.pop(variable, None)
+            else:
+                os.environ[variable] = previous
     def test_target_execution_cannot_escape_original_bound_roots(self):
         self.prepare(narrow_execution=True)
         before = self.store.path.read_bytes()

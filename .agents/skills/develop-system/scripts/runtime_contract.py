@@ -1,5 +1,6 @@
 """Versioned professional runtime artifact qualification, separate from checks."""
 import json
+from datetime import datetime
 from pathlib import Path
 
 from check_binding import source_inventory, validate_worktree, validate_binding, relative, digest
@@ -50,6 +51,23 @@ def validate_execution_scope(plan, binding):
         validate_binding(binding, relative(root, cwd))
 
 
+def timestamp(value):
+    parsed = datetime.fromisoformat(value)
+    require(parsed.tzinfo is not None, 'Runtime timestamp needs a timezone')
+    return parsed
+
+
+def validate_entry(plan, operation, candidate):
+    """Link declared argv to the named candidate entry, without a loaded-source claim."""
+    cwd = relative(Path(plan['root']).resolve(), operation['cwd'])
+    argv, position = operation['argv'], operation['entry_arg']
+    require(isinstance(argv, list) and type(position) is int and 0 <= position < len(argv), 'Invalid runtime entry position')
+    require(operation['entry'] in {f['path'] for f in candidate['files']}
+            and (cwd / argv[position]).resolve() == relative(Path(plan['root']).resolve(), operation['entry']),
+            'Runtime argv does not identify declared candidate entry')
+    return cwd
+
+
 def qualify(state, frame, evidence):
     """Validate provenance/currentness and professional consistency, not business truth."""
     from workflow_state import file_evidence
@@ -57,7 +75,9 @@ def qualify(state, frame, evidence):
     validate_contract(contract)
     file_evidence(evidence)
     envelope = json.loads(Path(evidence['path']).read_text(encoding='utf-8'))
-    require(envelope.get('version') == 1 and envelope.get('context') == 'managed-professional', 'Managed professional envelope required')
+    version = frame.get('runtime_evidence_version', 1)
+    require(envelope.get('version') == version and version in (1, 2)
+            and envelope.get('context') == 'managed-professional', 'Dispatched professional envelope version required')
     expected = {k: frame[k] for k in ('frame_id', 'parent_frame_id', 'input_version', 'skill_id')}
     expected['run_id'] = state['run_id']
     require(envelope.get('identity') == expected and envelope.get('binding') == frame.get('worktree_binding'), 'Runtime identity/binding mismatch')
@@ -69,6 +89,10 @@ def qualify(state, frame, evidence):
     result_ref = file_evidence(envelope['result'])
     result = json.loads(Path(result_ref['path']).read_text(encoding='utf-8'))
     require(result.get('context') == 'independent' and result.get('schema_version') == 1, 'Original runtime artifact required')
+    window = None
+    if version == 2:
+        window = (timestamp(envelope['execution_window']['started_at']), timestamp(envelope['execution_window']['finished_at']))
+        require(window[0] <= timestamp(result['created_at']) <= window[1], 'Runtime result lies outside invocation interval')
     plan = result['plan']
     require(plan['input_version'] == frame['input_version'] and plan['scope_adjustments'] == contract['scope_adjustments'], 'Runtime input or scope adjustment mismatch')
     require(Path(plan['root']).resolve() == Path(binding['worktree']['root']).resolve(), 'Runtime candidate root mismatch')
@@ -79,6 +103,15 @@ def qualify(state, frame, evidence):
         require(candidate['files'] == list(files.values()) and candidate['candidate_id'] == digest(files)
                 and result['candidate_after'] == candidate, 'Runtime candidate changed')
     references = {r['name']: file_evidence(r) for r in envelope['records']}
+    require(len(references) == len(envelope['records']), 'Duplicate runtime record reference')
+    used_records = [c['record'] for c in result['checks'] if c.get('record')]
+    require(len(set(used_records)) == len(used_records) and set(used_records) == set(references), 'Runtime records must match executed checks exactly')
+    receipt_ids = []
+    for reference in references.values():
+        recorded = json.loads(Path(reference['path']).read_text(encoding='utf-8'))
+        if recorded.get('context') == 'independent':
+            receipt_ids.append(recorded.get('record_id'))
+    require(len(set(receipt_ids)) == len(receipt_ids), 'One CLI execution receipt cannot stand for multiple operations')
     for check in result['checks']:
         if check.get('record'):
             require(check['record'] in references, 'Missing runtime execution evidence')
@@ -105,9 +138,26 @@ def qualify(state, frame, evidence):
                 return False
             if any(r.get('status') != 'passed' for r in check['identity'] + check['requests']):
                 return False
+            service = planned[check_id]['service']
+            require(check['launch']['mode'] == service['mode'], 'HTTP launch mode differs from plan')
+            if service['mode'] == 'owned':
+                cwd = validate_entry(plan, service, candidate)
+                require(check['launch'].get('argv') == service['argv'] and check['launch'].get('cwd') == str(cwd),
+                        'HTTP launch operation differs from plan')
+            requests = planned[check_id]['requests']
+            require(len(check['requests']) == len(requests) and all(
+                observed.get('method') == requested['method'] and observed.get('path') == requested['path']
+                for observed, requested in zip(check['requests'], requests)), 'HTTP business operations differ from plan')
         else:
             from record_check import validate_record
             validate_record(record)
+            cwd = validate_entry(plan, planned[check_id], candidate)
+            require(record.get('command') == planned[check_id]['argv']
+                    and record.get('execution_command') == planned[check_id]['argv']
+                    and record.get('cwd') == str(cwd), 'CLI receipt operation differs from planned entry')
+            if window:
+                require(window[0] <= timestamp(record['started_at']) <= timestamp(record['finished_at']) <= window[1],
+                        'CLI receipt lies outside invocation interval')
             if (record.get('context') != 'independent' or record.get('exit_code') != planned[check_id]['expected_exit']
                     or record.get('error') is not None or check.get('execution_status') != 'executed'
                     or len(check.get('assertions', [])) != len(planned[check_id]['assertions'])):
