@@ -82,6 +82,11 @@ def validate_plan(plan, registry):
                          or not step["authorization_reference"].strip()):
             raise ValueError("Recovery needs explicit premises and an existing authorization reference")
         steps[step["step_id"]] = step
+        if 'runtime_contract' in step:
+            from runtime_contract import validate_contract
+            validate_contract(step['runtime_contract'])
+            if step['skill_id'] != 'implement':
+                raise ValueError('Runtime task contract belongs to implement')
     visited, active = set(), set()
     def visit(name):
         if name not in steps or name in active:
@@ -155,6 +160,13 @@ def completion_qualification(state, criteria, checks, relevant, steps, *, necess
     qualified = []
     for criterion in criteria:
         reference = index[criterion['id']]
+        for parent in relevant:
+            if parent['skill_id'] == 'implement' and criterion['id'] in parent.get('runtime_contract', {}).get('criteria', {}):
+                from runtime_contract import qualify
+                runtime = next((f for f in relevant if f['frame_id'] == reference['source_frame_id']
+                    and f.get('parent_frame_id') == parent['frame_id'] and f['skill_id'] == 'runtime-verify'), None)
+                if not runtime or criterion['id'] not in qualify(state, runtime, runtime['runtime_evidence']):
+                    raise ValueError('Runtime criterion requires its bound professional conclusion')
         source = next((f for f in relevant if f['frame_id'] == reference['source_frame_id']), None)
         event = next((e for e in reversed(state['events']) if e['frame_id'] == reference['source_frame_id']), None)
         if not source or source['status'] != 'completed' or not event or source['skill_id'] in {'develop-system', 'ask-matt'}:
@@ -168,6 +180,12 @@ def completion_qualification(state, criteria, checks, relevant, steps, *, necess
             raise ValueError('Acceptance source kind, ownership or human confirmation does not match')
         qualified.append({**criterion, 'status': 'passed', 'evidence': [file_evidence(e) for e in check['evidence']],
                           'source_frame_id': source['frame_id'], 'source_skill_id': source['skill_id'], 'kind': check['kind']})
+        contract = source.get('runtime_contract', {})
+        adjusted = [a for a in contract.get('scope_adjustments', [])
+                    if set(a['check_ids']) & set(contract.get('criteria', {}).get(criterion['id'], []))]
+        if adjusted:
+            qualified[-1].update(status='passed_with_adjustment', scope_adjustments=copy.deepcopy(adjusted),
+                                 original_runtime_acceptance='deferred')
     return qualified
 
 
@@ -229,6 +247,9 @@ def frame_is_current(state, frame, visiting=()):
     if frame["frame_id"] in visiting or not all(evidence_is_current(e) for e in frame_evidence(frame)):
         return False
     try:
+        if frame.get('runtime_evidence'):
+            from runtime_contract import qualify
+            qualify(state, frame, frame['runtime_evidence'])
         candidates = ticket_candidates(state, frame, frame.get('acceptance_checks', []))
         if (candidates or frame.get('ticket_candidates')) and frame.get('ticket_candidates') != candidates:
             return False  # A stable review report cannot qualify changed declared source contents.
@@ -695,6 +716,9 @@ class RunStore:
                  "plan": [{**s, "status": "pending", "required": s.get("required", True)} for s in plan],
                  "acceptance": criteria,
                  "frames": [], "events": [], "assessments": [], "next_decision": {"action": "select_ready"}}
+        for step in plan:
+            if not set(step.get('runtime_contract', {}).get('criteria', {})) <= {c['id'] for c in criteria if c['kind'] == 'technical'}:
+                raise ValueError('Runtime contract must name existing technical criteria')
         from issue_sync import capture_enrollment  # Freeze opt-in eligibility only while creating this new identity.
         enrollment = capture_enrollment(self.project)
         if enrollment is not None:
@@ -889,6 +913,12 @@ class RunStore:
         for helper in descriptor["required_calls"]:
             source = selection[helper]
             obligations.append({"skill_id": helper, "skill_path": source["skill_path"], "skill_sha256": source["sha256"]})
+        runtime_contract = copy.deepcopy((step if step_id is not None else parent).get('runtime_contract'))
+        if runtime_contract and skill_id == 'implement':
+            runtime_selection = preflight_skills(state, self.project, 'runtime-verify')
+            source = runtime_selection['runtime-verify']
+            selection.update(runtime_selection)
+            obligations.append({'skill_id': 'runtime-verify', 'skill_path': source['skill_path'], 'skill_sha256': source['sha256']})
         if parent_frame_id and any(duty["skill_id"] == skill_id for duty in parent.get("completion_obligations", [])):
             required = True
         prerequisites = (step if step_id is not None else parent).get("shared_preconditions", [])
@@ -908,10 +938,55 @@ class RunStore:
                                 "completion_obligations": obligations,
                                 "inputs": captured, "artifacts": [], "needs_assessment": False})
         frame = state["frames"][-1]
+        if runtime_contract and skill_id in {'implement', 'runtime-verify'}:
+            frame['runtime_contract'] = runtime_contract
         frame["worktree_binding"] = (bind_worktree(self.project, state["run_id"], frame["frame_id"],
             input_version, worktree) if worktree is not None else None)
+        if runtime_contract and skill_id == 'runtime-verify':
+            original = parent.get('worktree_binding')
+            current = frame['worktree_binding']
+            if not original or not current or parent['input_version'] != input_version or any(
+                    original[k] != current[k] for k in ('project', 'worktree', 'execution_roots', 'source_ranges')):
+                raise ValueError('Runtime helper must preserve parent input and worktree scope')
         state["next_decision"] = {"action": "execute_frame", "frame_id": frame["frame_id"], "return_to": "develop-system"}
         return state
+
+    def adjust_runtime_scope(self, revision, parent_frame_id, adjustment):
+        """Apply a named user deferral to an active v1 task, preserving original history."""
+        def change(state):
+            require_current(state)
+            parent = next((f for f in state['frames'] if f['frame_id'] == parent_frame_id), None)
+            if (state['status'] != 'running' or not parent or parent['status'] != 'running'
+                    or parent['skill_id'] != 'implement' or not parent.get('runtime_contract')):
+                raise ValueError('Scope amendment requires an active opted-in implement task')
+            original = copy.deepcopy(parent['runtime_contract'])
+            revised = copy.deepcopy(original)
+            revised['scope_adjustments'].append(copy.deepcopy(adjustment))
+            revised['revision'] = original.get('revision', 1) + 1
+            from runtime_contract import validate_contract
+            validate_contract(revised)
+            named = set(adjustment['check_ids'])
+            already = {c for a in original['scope_adjustments'] for c in a['check_ids']}
+            if named & already:
+                raise ValueError('Scope decision must name newly deferred requirements')
+            children = [f for f in state['frames'] if f.get('parent_frame_id') == parent_frame_id
+                        and f['skill_id'] in {'runtime-verify', 'code-review'} and f['status'] != 'superseded']
+            affected = descendant_frame_ids(state['frames'], {f['frame_id'] for f in children})
+            if any(f['frame_id'] in affected and f['status'] == 'running' for f in state['frames']):
+                raise ValueError('Receive active professional work before scope amendment')
+            # System and unrelated restrictions keep their existing authority. This is a scope
+            # decision, not a professional finding resolution or evidence rewrite.
+            if any(r.get('frame_id') in affected for r in state['restrictions']):
+                raise ValueError('Resolve scoped execution restrictions before amendment')
+            state.setdefault('runtime_scope_amendments', []).append({
+                'parent_frame_id': parent_frame_id, 'original_contract': original,
+                'revised_contract': copy.deepcopy(revised), 'decision': copy.deepcopy(adjustment),
+                'retired_frames': [copy.deepcopy(f) for f in state['frames'] if f['frame_id'] in affected]})
+            supersede_tree(state['frames'], affected)
+            parent['runtime_contract'] = revised
+            state['next_decision'] = {'action': 'resume_parent', 'frame_id': parent_frame_id}
+            return state
+        return self.mutate(revision, change)
 
     def receive(self, revision, result):
         state = self.mutate(revision, lambda state: self._receive_state(state, result))
@@ -1011,6 +1086,17 @@ class RunStore:
                 if check["kind"] == "human" and (check.get("human_confirmed") is not True or not isinstance(check.get("user_reference"), str) or not check["user_reference"].strip()):
                     raise ValueError("Human acceptance requires an actual user confirmation reference")
         captured_candidates = ticket_candidates(state, selected_frame, acceptance) if item['status'] == 'completed' else {}
+        if selected_frame.get('runtime_contract') and selected_frame['skill_id'] == 'runtime-verify':
+            from runtime_contract import qualify
+            if not isinstance(item.get('runtime_evidence'), dict) or not item['runtime_evidence'].get('path'):
+                raise ValueError('Managed runtime evidence required')
+            envelope = file_evidence(item.get('runtime_evidence', {}))
+            outcome = qualify(state, selected_frame, envelope)
+            item['runtime_evidence'] = envelope
+            if any(c['status'] == 'passed' and c['id'] not in outcome for c in acceptance):
+                raise ValueError('Runtime conclusion lacks qualified business evidence')
+            if set(selected_frame['runtime_contract']['criteria']) != outcome and item['status'] == 'completed' and not item['blockers']:
+                raise ValueError('Unaccepted runtime requires explicit blockers')
         if captured_candidates:
             item['ticket_candidates'] = captured_candidates  # Collected from original authority and actual allowed bytes.
         elif 'ticket_candidates' in item:
@@ -1022,6 +1108,8 @@ class RunStore:
         frame["artifacts"] = item["artifacts"]
         frame["checks"] = item["checks"]
         frame["acceptance_checks"] = acceptance
+        if 'runtime_evidence' in item:
+            frame['runtime_evidence'] = item['runtime_evidence']
         if captured_candidates:
             frame['ticket_candidates'] = captured_candidates
         frame["resolved_findings"] = resolutions

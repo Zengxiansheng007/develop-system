@@ -52,6 +52,20 @@
   },
   "skills": [
     {
+      "id": "runtime-verify",
+      "stage": "development-testing",
+      "role": "auxiliary",
+      "enabled": true,
+      "return_to": "develop-system",
+      "fallback": "blocked",
+      "when": "Explicit task runtime contract requires business evidence",
+      "done_when": "Runtime professional evidence returned with honest acceptance and blockers",
+      "requires": [],
+      "outputs": ["Versioned professional runtime envelope"],
+      "required_calls": [],
+      "path": "../runtime-verify/SKILL.md"
+    },
+    {
       "id": "develop-system",
       "stage": "prepare",
       "role": "controller",
