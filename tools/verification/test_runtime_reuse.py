@@ -129,6 +129,38 @@ class ReuseTests(unittest.TestCase):
             self.assertFalse(list((root / 'second').glob('command-*.json')))
             self.assertEqual((root / 'first/result.json').read_bytes(), original)
 
+    def test_fresh_passed_check_survives_unrelated_initial_environment_blocker(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            plan = self.plan(root)
+            blocked = copy.deepcopy(plan['checks'][0])
+            blocked['id'] = 'blocked'
+            (root / 'blocked.cjs').write_text("console.log('unavailable')")
+            plan['candidate'].append({'path': 'blocked.cjs', 'role': 'source'})
+            blocked.update(entry='blocked.cjs', argv=[blocked['argv'][0], 'blocked.cjs'], candidate_paths=['blocked.cjs'])
+            blocked['requalification']['argv'][0] = str(root / 'unavailable-node.exe')
+            plan['checks'].insert(0, blocked)
+            plan['coverage']['success'].insert(0, 'blocked')
+            first = verify(plan, root / 'first')
+            self.assertEqual(first['runtime_status'], 'unaccepted')
+            self.assertEqual(first['checks'][1]['execution_status'], 'executed')
+            second = verify(plan, root / 'second', previous=root / 'first/result.json')
+            self.assertEqual(second['runtime_status'], 'unaccepted')
+            self.assertEqual(second['checks'][1]['execution_status'], 'reused')
+            self.assertEqual(second['checks'][1]['original']['result_id'], first['result_id'])
+
+    def test_own_candidate_drift_during_execution_still_prevents_reuse(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            plan = self.plan(root)
+            path = root / 'export.cjs'
+            path.write_text(path.read_text() + "require('node:fs').appendFileSync('export.cjs', '\\n// changed');")
+            first = verify(plan, root / 'first')
+            self.assertEqual(first['checks'][0]['status'], 'passed')
+            self.assertEqual(first['runtime_status'], 'unaccepted')
+            second = verify(plan, root / 'second', previous=root / 'first/result.json')
+            self.assertEqual(second['checks'][0]['execution_status'], 'executed')
+
 
 class HTTPReuseTests(unittest.TestCase):
     plan = http_fixtures.HTTPRuntimeTests.plan

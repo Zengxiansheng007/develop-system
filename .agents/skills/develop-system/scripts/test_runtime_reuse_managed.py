@@ -45,6 +45,29 @@ class ManagedReuseTests(unittest.TestCase):
             execute(self.store, self.frame['frame_id'], self.plan, self.root / uuid.uuid4().hex,
                     previous=first['runtime_evidence']['path'])
 
+    def test_new_failed_runtime_invalidates_old_review_and_is_itself_reviewable(self):
+        self.prepare()
+        first = self.run_runtime()
+        self.state = self.store.receive(self.state['revision'], first)
+        self.state = self.store.dispatch(self.state['revision'], 'code-review', 'v1', parent_frame_id=self.parent['frame_id'])
+        review = self.state['frames'][-1]
+        event = {**first, 'event_id': uuid.uuid4().hex, 'frame_id': review['frame_id'],
+                 'parent_frame_id': review['parent_frame_id'], 'skill_id': review['skill_id'], 'acceptance_checks': []}
+        del event['runtime_evidence']
+        self.state = self.store.receive(self.state['revision'], event)
+        self.state = self.store.dispatch(self.state['revision'], 'runtime-verify', 'v1',
+            parent_frame_id=self.parent['frame_id'], worktree=self.authorization())
+        self.frame = self.state['frames'][-1]
+        self.plan['checks'][0]['assertions'][0]['equals'] = 'new required expectation\n'
+        failed = self.run_runtime()
+        self.assertTrue(failed['blockers'])
+        self.state = self.store.receive(self.state['revision'], failed)
+        self.state = self.store.resume(self.state['revision'])
+        old_review = next(f for f in self.state['frames'] if f['frame_id'] == review['frame_id'])
+        self.assertEqual(old_review['status'], 'stale')
+        self.state = self.store.dispatch(self.state['revision'], 'code-review', 'v1', parent_frame_id=self.parent['frame_id'])
+        self.assertEqual(self.state['frames'][-1]['runtime_review_sources'], [self.frame['frame_id']])
+
 
 if __name__ == '__main__':
     unittest.main()

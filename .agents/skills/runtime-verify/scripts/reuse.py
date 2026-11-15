@@ -102,9 +102,15 @@ def reusable(previous, plan, check, candidate, direct=False):
         return resolved
     if (not item or item.get('status') != 'passed' or item.get('execution_status') != 'executed'
             or item.get('premises') != premises(plan, check, candidate)
-            or not item.get('environment_observation') or item['environment_observation']['status'] != 'passed'
-            or old['blockers'] or old['candidate'] != old['candidate_after']):
+            or not item.get('environment_observation') or item['environment_observation']['status'] != 'passed'):
         return None
+    scoped_files = item['premises']['files']
+    scoped_paths = {f['path'] for f in scoped_files}
+    for boundary in ('candidate', 'candidate_after'):
+        snapshot = old.get(boundary)
+        if (not snapshot or snapshot.get('root') != candidate['root']
+                or [f for f in snapshot['files'] if f['path'] in scoped_paths] != scoped_files):
+            return None  # Unrelated blockers do not erase this check's own integrity boundary.
     record = reference(Path(previous).parent / item['record'])
     read_reference(item['environment_observation']['record'])
     if record != item.get('record_reference'):

@@ -165,6 +165,11 @@ def completion_qualification(state, criteria, checks, relevant, steps, *, necess
                 from runtime_contract import qualify
                 runtime = next((f for f in relevant if f['frame_id'] == reference['source_frame_id']
                     and f.get('parent_frame_id') == parent['frame_id'] and f['skill_id'] == 'runtime-verify'), None)
+                if parent.get('runtime_review_version') == 1:
+                    effective = [f for f in relevant if f.get('parent_frame_id') == parent['frame_id']
+                                 and f['skill_id'] == 'runtime-verify' and f.get('runtime_evidence')]
+                    if not effective or runtime != effective[-1]:
+                        raise ValueError('Runtime completion requires the latest effective professional result')
                 if not runtime or criterion['id'] not in qualify(state, runtime, runtime['runtime_evidence']):
                     raise ValueError('Runtime criterion requires its bound professional conclusion')
         source = next((f for f in relevant if f['frame_id'] == reference['source_frame_id']), None)
@@ -250,6 +255,11 @@ def frame_is_current(state, frame, visiting=()):
         for source_id in frame.get('runtime_review_sources', []):
             source = next((f for f in state['frames'] if f['frame_id'] == source_id), None)
             if not source or source['status'] != 'completed' or not frame_is_current(state, source, (*visiting, frame['frame_id'])):
+                return False
+            effective = [f for f in state['frames'] if f.get('parent_frame_id') == source.get('parent_frame_id')
+                         and f['skill_id'] == 'runtime-verify' and f.get('runtime_evidence')
+                         and f['status'] != 'superseded']
+            if not effective or effective[-1]['frame_id'] != source_id:
                 return False
         if frame.get('runtime_evidence'):
             from runtime_contract import qualify
