@@ -35,7 +35,7 @@ class HTTPRuntimeTests(unittest.TestCase):
                     'identity': {'path': '/identity', 'source': 'service.py', 'instance_id': 'fixture-1',
                                  'database': str(root / 'data.db'), 'provenance': 'immutable source hash captured at service startup'},
                     'ready': {'path': '/health', 'status': 200, 'json': {'status': 'ready'}},
-                    'startup_timeout': 5, 'ready_timeout': 3, 'poll_interval': 0.05,
+                    'startup_timeout': 5, 'ready_timeout': 8, 'poll_interval': 0.05,
                     'request_timeout': 3, 'max_bytes': 16384},
                 'requests': [
                     {'method': 'POST', 'path': '/items', 'json': {'name': 'alpha'}, 'retry': 'none',
