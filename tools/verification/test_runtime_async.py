@@ -50,7 +50,8 @@ class AsyncRuntimeTests(unittest.TestCase):
                 root = Path(folder)
                 plan = self.plan(root, mode)
                 check = plan['checks'][0]
-                check['requests'][0]['poll'].update(max_attempts=2, interval=0.25)
+                attempt_limit = 20 if mode in ('failure', 'wrong_total') else 2  # Terminal cases need to observe the fixture's delayed worker, not exhaust early.
+                check['requests'][0]['poll'].update(max_attempts=attempt_limit, interval=0.25)  # Keep the existing bounded four-second terminal deadline.
                 if mode == 'slow':
                     check['requests'][0]['poll']['timeout'] = 8
                 check['cleanup']['external_owner'] = 'test harness owns isolated SQLite jobs and removes database after service shutdown'
@@ -61,7 +62,7 @@ class AsyncRuntimeTests(unittest.TestCase):
                     self.assertEqual(result['runtime_status'], 'unaccepted', result)
                     poll = result['checks'][0]['requests'][0]['poll']
                     self.assertEqual(poll['outcome'], outcome, result)
-                    self.assertLessEqual(len(poll['observations']), 2)
+                    self.assertLessEqual(len(poll['observations']), attempt_limit)  # Stuck/correlation/transport cases retain the two-attempt bound.
                     self.assertEqual(self.send(origin, 'GET', '/jobs')['count'], 1)
                     self.assertIsNone(process.poll())
 
