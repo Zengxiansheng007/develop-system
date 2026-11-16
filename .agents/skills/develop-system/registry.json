@@ -52,6 +52,36 @@
   },
   "skills": [
     {
+      "id": "security-differential-audit",
+      "stage": "development-testing",
+      "role": "entry",
+      "enabled": true,
+      "return_to": "develop-system",
+      "fallback": "blocked",
+      "when": "Only an explicit user request for independent security differential audit; never security keywords alone",
+      "done_when": "Scoped findings and coverage/gaps returned with source evidence and confidence",
+      "requires": [],
+      "outputs": [
+        "Security differential findings and coverage report"
+      ],
+      "required_calls": [],
+      "path": "../security-differential-audit/SKILL.md"
+    },
+    {
+      "id": "runtime-verify",
+      "stage": "development-testing",
+      "role": "auxiliary",
+      "enabled": true,
+      "return_to": "develop-system",
+      "fallback": "blocked",
+      "when": "Explicit task runtime contract requires business evidence",
+      "done_when": "Runtime professional evidence returned with honest acceptance and blockers",
+      "requires": [],
+      "outputs": ["Versioned professional runtime envelope"],
+      "required_calls": [],
+      "path": "../runtime-verify/SKILL.md"
+    },
+    {
       "id": "develop-system",
       "stage": "prepare",
       "role": "controller",

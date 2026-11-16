@@ -2,6 +2,8 @@
 
 This repository owns the develop-system dispatcher, navigation entry, and the 25 bundled engineering skills listed in `release-manifest.json`. Author source under `.agents/skills/`. Generated verification packages and release archives are ignored outputs, not another editable source tree.
 
+The manifest also ships the local implement-runtime extension and independent runtime-verify capability. The [CLI contract](../.agents/skills/runtime-verify/references/cli-contract.md) and [HTTP lifecycle contract](../.agents/skills/runtime-verify/references/http-contract.md) define public plans. Scope and reuse provenance are recorded in [T01](runtime-verification/t01.md) and [T02](runtime-verification/t02.md). They do not yet establish managed runtime integration.
+
 ## Baseline and boundaries
 
 The import preserves the engineering source from the exact coedx-home commit and hashes in `docs/provenance/import-manifest.json`. Per-skill `source.json` and LICENSE retain upstream attribution. UI-Test product source, its Issues, active run state and historical evidence remain in their original locations. Future develop-system development belongs here; old runs remain bound to the version under which they started until an explicit migration.
@@ -24,13 +26,17 @@ For changes, start with the affected tests and direct dependants. The release bo
 
 ## Maintenance
 
+The manifest also ships [security-differential-audit](../.agents/skills/security-differential-audit/SKILL.md), an explicit-only independent entry. Its adapted text is CC BY-SA 4.0, an exception to repository MIT; retain its exact LICENSE, SOURCE.md and source.json when packaging. [T08](runtime-verification/t08.md) records reuse and validation boundaries.
+
+For reviewed upstream implement replacement, use [T07 restoration](runtime-verification/t07.md) and its shipped public protocol. Restoring an entry does not qualify its runtime behavior.
+
 Issue synchronization includes creation/accepted-return/successful-assessment/completion lifecycle hooks, explicit delivery updates and completed-run catch-up through the same independently qualified sync seam. Original ticket scope, parent acceptance, controls, source currentness, conflict history and bounded service waits remain authoritative. The public engine contract is in [Issue synchronization](issue-sync/README.md); the shipped [lifecycle and project operations](../.agents/skills/develop-system/references/issue-sync-lifecycle.md) owns configuration, foreground controls and PR handoff instructions. Real configuration remains default-off; local controlled GitHub/HTTP checks do not perform real GitHub writes.
 
 Command receipts from tools/checks.py are independent check-record v2 and require no run. Managed checks separately use dispatched worktree bindings and actual execution-time source observation; see [check records](../.agents/skills/develop-system/references/check-records.md). Repository success is not automatically managed-frame proof. Existing v1 receipts remain historical originals.
 
 The verification entry accepts `--timeout <seconds>` per command (default 300). Use a bounded larger value when observed real Git worktree checks exceed that duration; preserve the original timeout receipt.
 
-CI explicitly selects 1200 seconds per verification command on Windows and 300 on Ubuntu. The 391-test real-Git workflow suite exceeded the previous 300-second Windows envelope in PR #24; the same candidate already has a complete local run at about 1127 seconds. This bounded CI override adjusts the verification envelope; it does not change the local default, test selection, failure handling, or product runtime deadlines, and does not claim a performance improvement. A stalled Windows verification command can now take up to 1200 seconds to be reported. Preserve the original timeout and diagnose any further timeout instead of automatically extending this value.
+Both CI verification entrypoints (checks and release preparation) explicitly select 1800 seconds per command on Windows and 300 on Ubuntu. The historical 391-test real-Git workflow suite in PR #24 completed locally in about 1127 seconds after exceeding its original 300-second allowance. With coverage expanded to 408 tests, the Windows final check at candidate `5a75816` reached the 1200-second command limit after 389 completed tests, all successful, while entering the final 19-test module; that module previously took 129.052 seconds. The failed timeout receipt remains evidence of an incomplete suite, not a pass. The bounded 1800-second allowance accommodates the remaining module and variation; it preserves the local default of 300 seconds, test selection, assertions, failure handling and product runtime deadlines, and makes no performance improvement claim. A stalled Windows command may take up to 1800 seconds to be reported. Preserve original failures and diagnose any further timeout before changing this bound; a fresh complete final check is still required.
 
 Update source and related tests/documentation together. Add or remove shipped skills through `release-manifest.json`, with license and dependency review. Keep source provenance immutable as a historical baseline; version control records later edits. A schema change needs an explicit compatibility and migration contract.
 

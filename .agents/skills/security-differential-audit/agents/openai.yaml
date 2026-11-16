@@ -1,0 +1,5 @@
+interface:
+  display_name: "Security differential audit"
+  short_description: "Explicit, scoped security review of a change"
+policy:
+  allow_implicit_invocation: false

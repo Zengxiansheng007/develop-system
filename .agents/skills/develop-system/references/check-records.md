@@ -6,6 +6,8 @@
 
 原有 `run_record(argv, cwd, output, timeout=300)` 和 CLI 继续可用，无需建立 run。新输出为 schema_version: 2、context: independent，保存 command、execution_command、cwd、时间、stdout/stderr、exit_code、error 和 status。输出必须是新文件；退出 0 且没有执行/采集错误才是 passed。超时和启动错误如实保存。
 
+独立适配可传 `before_persist(record)` 回调，在内存中检查业务结果并返回脱敏记录，首次写入前仍校验记录结构。此回调不接受 managed binding，默认调用行为不变；受管身份和命令不得借脱敏变更。runtime-verify 使用此入口，原始输出不先写入中间记录。
+
 `tools/checks.py` 默认产生独立 v2 记录，summary 的各检查列出 context。仓库检查通过不会自动成为某个运行的受管证明。独立记录可以作为明确说明用途的 artifact；新的 checks 回流要求受管契约。
 
 ## 派发授权与冻结

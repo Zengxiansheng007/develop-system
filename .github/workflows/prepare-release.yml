@@ -32,7 +32,7 @@ jobs:
         with:
           python-version: '3.13'
       - run: python -m pip install -r requirements-checks.txt
-      - run: python -B tools/checks.py --output-dir .scratch/release-verification
+      - run: python -B tools/checks.py --output-dir .scratch/release-verification --timeout ${{ runner.os == 'Windows' && 1800 || 300 }}
       - shell: bash
         run: python -B tools/release_bundle.py --version "$RELEASE_VERSION" --output-dir dist/candidate
       - uses: actions/upload-artifact@v4

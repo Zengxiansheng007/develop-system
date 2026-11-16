@@ -16,7 +16,11 @@ def now():
     return datetime.now(timezone.utc).isoformat()
 
 
-def run_record(command, cwd, output, timeout=300, *, binding=None, candidate=None):
+def run_record(command, cwd, output, timeout=300, *, binding=None, candidate=None, before_persist=None):
+    # Independent adapters can inspect/redact in memory before the first write.
+    # Managed evidence retains its exact existing command/identity contract.
+    if before_persist is not None and binding is not None:
+        raise ValueError('Record transformation is independent-only')
     if not command or any(not isinstance(a, str) or not a for a in command):
         raise ValueError('Nonempty argv required')
     output = Path(output).resolve()
@@ -62,6 +66,9 @@ def run_record(command, cwd, output, timeout=300, *, binding=None, candidate=Non
             record['error'] = str(exc)
         record['finished_at'] = now()
         record['status'] = 'passed' if record['exit_code'] == 0 and record['error'] is None else 'failed'
+        if before_persist is not None:
+            record = before_persist(record)
+            validate_record(record)
         json.dump(record, destination, ensure_ascii=False, indent=2)
         destination.write('\n')
         destination.flush()
