@@ -74,7 +74,7 @@ def observe(plan, check, output, index, clean):
             or not probe.get('scope') or not isinstance(probe.get('stdout'), str)
             or not 0 < probe['timeout'] <= 300):
         raise ValueError('Explicit bounded environment probe required')
-    cwd = relative(Path(plan['root']), probe['cwd'])
+    cwd = relative(Path(plan['root']).resolve(strict=True), probe['cwd'])  # Match the canonical independent candidate scope.
     passed = False
     def collect(record):
         nonlocal passed
@@ -157,6 +157,6 @@ def validate_reuse(item, plan, check, candidate):
     probe = check['requalification']
     if (observation['status'] != 'passed' or record['status'] != 'passed'
             or record['command'] != probe['argv'] or record['execution_command'] != probe['argv']
-            or record['cwd'] != str(relative(Path(plan['root']), probe['cwd']))):
+            or record['cwd'] != str(relative(Path(plan['root']).resolve(strict=True), probe['cwd']))):  # Use the same scope as observation.
         raise ValueError('Current environment observation missing')
     return original, record

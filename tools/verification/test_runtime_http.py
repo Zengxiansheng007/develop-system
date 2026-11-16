@@ -33,7 +33,7 @@ class HTTPRuntimeTests(unittest.TestCase):
                     'argv': [sys.executable, '-B', 'service.py', 'data.db', 'port.json', 'fixture-1', mode],
                     'cwd': '.', 'origin': 'http://127.0.0.1', 'port_file': 'port.json',
                     'identity': {'path': '/identity', 'source': 'service.py', 'instance_id': 'fixture-1',
-                                 'database': str(root / 'data.db'), 'provenance': 'immutable source hash captured at service startup'},
+                                 'database': str((root / 'data.db').resolve()), 'provenance': 'immutable source hash captured at service startup'},  # Match the fixture's advertised identity, including Windows aliases.
                     'ready': {'path': '/health', 'status': 200, 'json': {'status': 'ready'}},
                     'startup_timeout': 5, 'ready_timeout': 8, 'poll_interval': 0.05,
                     'request_timeout': 3, 'max_bytes': 16384},

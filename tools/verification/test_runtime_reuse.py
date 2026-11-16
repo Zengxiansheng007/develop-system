@@ -16,6 +16,23 @@ from verify import verify
 class ReuseTests(unittest.TestCase):
     fixture = fixtures.RuntimeReceiptTests.fixture
 
+    def test_noncanonical_root_requalifies_and_reuses_original_execution(self):
+        with tempfile.TemporaryDirectory() as folder:  # Exercise the public plan with a real path alias.
+            root = Path(folder).resolve()  # Keep the receipt reader independent of the supplied spelling.
+            plan = self.plan(root)  # Use the existing real Node entry and probe.
+            plan['root'] = str(root / '..' / root.name)  # Portable equivalent of the CI short-name discrepancy.
+            first = verify(plan, root / 'first')  # Requalification must stay inside the canonical candidate.
+            self.assertEqual(first['runtime_status'], 'passed', first['blockers'])  # Diagnose the original blocker.
+            second = verify(plan, root / 'second', previous=root / 'first/result.json')  # Do not replay the business write.
+            self.assertEqual(second['checks'][0]['execution_status'], 'reused')  # Retain the first execution identity.
+            self.assertEqual(second['checks'][0]['original']['result_id'], first['result_id'])  # Check direct provenance.
+            from reuse import validate_reuse  # Exercise the same validation used when adopting managed evidence.
+            validate_reuse(second['checks'][0], plan, plan['checks'][0], second['candidate'])  # The fresh probe must remain admissible.
+            plan['checks'][0]['requalification']['cwd'] = '..'  # A genuine escape is still outside the canonical root.
+            blocked = verify(plan, root / 'blocked', previous=root / 'first/result.json')  # Preserve original success separately.
+            self.assertEqual(blocked['checks'][0]['execution_status'], 'not_run')  # Do not run a probe outside scope.
+            self.assertIn('Candidate range escapes worktree', blocked['blockers'])  # Keep the authorization guard intact.
+
     def plan(self, root):
         plan = self.fixture(root)
         for name, role in [('test.txt', 'test'), ('config.txt', 'config'), ('dependency.txt', 'dependency')]:
@@ -166,6 +183,20 @@ class HTTPReuseTests(unittest.TestCase):
     plan = http_fixtures.HTTPRuntimeTests.plan
     existing = http_fixtures.HTTPRuntimeTests.existing
     send = http_fixtures.HTTPRuntimeTests.send
+
+    def test_noncanonical_fixture_root_declares_actual_database_identity(self):
+        with tempfile.TemporaryDirectory() as folder:  # Run a real existing service with an aliased fixture root.
+            root = Path(folder).resolve()  # The service advertises the canonical absolute database identity.
+            plan = self.plan(root / '..' / root.name)  # Preserve the caller's noncanonical candidate spelling.
+            check = plan['checks'][0]  # Reuse the public HTTP contract without weakening identity comparison.
+            check['requalification'] = {'scope': 'same live process and canonical database identity'}  # Observe before reuse.
+            check['cleanup']['external_owner'] = 'fixture owns created row'  # Existing service cleanup remains external.
+            with self.existing(root, plan) as (_, origin):  # Real HTTP/SQLite; no mocked identity response.
+                first = verify(plan, root / 'first')  # The declared identity must match the launched fixture.
+                self.assertEqual(first['runtime_status'], 'passed', first['blockers'])  # Catch the original mismatch.
+                second = verify(plan, root / 'second', previous=root / 'first/result.json')  # Requalify the original evidence.
+                self.assertEqual(second['checks'][0]['execution_status'], 'reused')  # No second business execution.
+                self.assertEqual(self.send(origin, 'GET', '/items')['names'], ['alpha'])  # Verify no duplicate write.
 
     def test_requalification_omits_unselected_payloads_on_success_and_failure(self):
         with tempfile.TemporaryDirectory() as folder:
